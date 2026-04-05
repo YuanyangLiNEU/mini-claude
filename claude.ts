@@ -8,7 +8,7 @@
  */
 
 import { getAccessToken, OAUTH_BETA_HEADER } from './auth.ts'
-import { makeLogger } from './debug.ts'
+import { isDebugEnabled, makeLogger } from './debug.ts'
 
 const log = makeLogger('api')
 
@@ -258,6 +258,9 @@ export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
     }
   }
 
+  // When debug is on, close any mid-line stdout text before this log
+  // lands on stderr (otherwise it visually attaches to Claude's text).
+  if (isDebugEnabled()) process.stdout.write('\n')
   log.debug('stream complete', {
     stopReason,
     totalMs: Date.now() - startMs,

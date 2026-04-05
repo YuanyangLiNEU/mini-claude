@@ -71,11 +71,12 @@ function write(subsystem: string, level: Level, msg: string, data?: unknown): vo
   const ts = timestamp()
   const lvl = level.toUpperCase().padEnd(5)
   const color = levelColor(level)
-  const line = `${DIM}${ts}${RESET} ${color}[${lvl}]${RESET} ${DIM}[${subsystem}]${RESET} ${msg}`
 
-  let fullLine = line
+  // Render the data (JSON-stringified if not already a string) ahead of time
+  // so we can style the whole message consistently.
+  let dataStr = ''
   if (data !== undefined) {
-    const dataStr =
+    dataStr = ' ' + (
       typeof data === 'string'
         ? data
         : (() => {
@@ -85,10 +86,26 @@ function write(subsystem: string, level: Level, msg: string, data?: unknown): vo
               return String(data)
             }
           })()
-    fullLine += ` ${DIM}${dataStr}${RESET}`
+    )
   }
 
-  process.stderr.write(fullLine + '\n')
+  // For debug level: dim the whole line so it recedes from the user's gaze.
+  // For info/warn/error: color the bracket, keep the message itself bright so
+  // it stands out (these signal that something important is being reported).
+  let line: string
+  if (level === 'debug') {
+    // Everything dim/gray — recedes from view but still readable if needed
+    line = `${GRAY}${ts} [${lvl}] [${subsystem}] ${msg}${dataStr}${RESET}`
+  } else {
+    const styledLvl = color ? `${color}[${lvl}]${RESET}` : `[${lvl}]`
+    line =
+      `${DIM}${ts}${RESET} ` +
+      `${styledLvl} ` +
+      `${DIM}[${subsystem}]${RESET} ` +
+      `${msg}${DIM}${dataStr}${RESET}`
+  }
+
+  process.stderr.write(line + '\n')
 }
 
 /**

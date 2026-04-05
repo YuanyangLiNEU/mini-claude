@@ -125,3 +125,93 @@ export const readFileTool: AnyTool = defineTool<{ path: string }, string>({
     return text
   },
 })
+
+/**
+ * list_files — list the contents of a directory.
+ *
+ * Reference: claude-code has no dedicated `ls` tool — they use GlobTool for
+ * pattern-based discovery and BashTool for arbitrary `ls` commands. For
+ * mini-claude, a dedicated list_files is simpler to teach and safer to
+ * expose (no shell-injection risk).
+ */
+export const listFilesTool: AnyTool = defineTool<{ path: string }, string>({
+  name: 'list_files',
+  description:
+    'List the entries in a directory. Returns each entry on its own line with ' +
+    'type (file/dir) and size in bytes. Use absolute paths.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Absolute path to the directory to list.',
+      },
+    },
+    required: ['path'],
+  },
+  async execute({ path }) {
+    const { readdir, stat } = await import('node:fs/promises')
+    let entries: string[]
+    try {
+      entries = await readdir(path)
+    } catch (err) {
+      throw new Error(
+        `cannot list directory: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    entries.sort()
+    const lines: string[] = [`${entries.length} entries in ${path}:`]
+    for (const name of entries) {
+      try {
+        const s = await stat(`${path}/${name}`)
+        const kind = s.isDirectory() ? 'dir ' : 'file'
+        const size = s.isDirectory() ? '-' : String(s.size)
+        lines.push(`  ${kind}  ${size.padStart(10)}  ${name}`)
+      } catch {
+        lines.push(`  ?     ?           ${name}`)
+      }
+    }
+    return lines.join('\n')
+  },
+})
+
+/**
+ * write_file — write text content to a file, creating it if missing,
+ * overwriting if it exists. Parent directories are created as needed.
+ *
+ * Reference: claude-code src/tools/FileWriteTool/FileWriteTool.ts (434 lines —
+ * handles atomic writes, staleness detection, file history snapshots,
+ * diagnostic tracking, skill discovery). Ours: write the bytes.
+ *
+ * Marked as dangerous (isDangerous: true) — Phase 2 will enforce a permission
+ * prompt before this runs. For now it runs unprompted.
+ */
+export const writeFileTool: AnyTool = defineTool<
+  { path: string; content: string },
+  string
+>({
+  name: 'write_file',
+  description:
+    'Write text content to a file. Creates the file if it does not exist, ' +
+    'and OVERWRITES it if it does. Parent directories are created automatically. ' +
+    'Returns the number of bytes written. Use absolute paths.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Absolute path where the file should be written.',
+      },
+      content: {
+        type: 'string',
+        description: 'The full text content to write to the file.',
+      },
+    },
+    required: ['path', 'content'],
+  },
+  isDangerous: true,
+  async execute({ path, content }) {
+    const bytes = await Bun.write(path, content)
+    return `wrote ${bytes} bytes to ${path}`
+  },
+})

@@ -11,6 +11,7 @@
 
 import { stream, type ApiMessage, type ContentBlock } from './claude.ts'
 import { makeLogger } from './debug.ts'
+import { allowAll, type CanUseTool } from './permissions.ts'
 import { findTool, stringifyToolResult, toolsToApiFormat, type AnyTool } from './tools.ts'
 
 const log = makeLogger('agent')
@@ -47,11 +48,18 @@ export type RunAgentOpts = {
   model?: string
   /** Safety cap on agent iterations (each = one API call). Default: 10. */
   maxTurns?: number
+  /**
+   * Permission check run before each tool call. If it returns 'deny', the
+   * tool does NOT run and a permission-denied tool_result is sent back to
+   * Claude. Defaults to allow-all (unsafe — set this in any real REPL).
+   */
+  canUseTool?: CanUseTool
 }
 
 export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> {
   const { userInput, history, tools, system, model } = opts
   const maxTurns = opts.maxTurns ?? 10
+  const canUseTool = opts.canUseTool ?? allowAll
 
   // 1. Append the user's message to history
   history.push({
@@ -160,6 +168,22 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
         yield { type: 'tool_result', id: tu.id, name: tu.name, result: msg, isError: true }
         continue
       }
+      // Permission gate — ask the user (or a policy) before running.
+      // Safe tools are auto-allowed inside the canUseTool implementation.
+      const decision = await canUseTool(tool, tu.input)
+      if (decision === 'deny') {
+        const msg = `user denied permission for ${tu.name}`
+        log.info('tool denied', { name: tu.name })
+        resultBlocks.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: msg,
+          is_error: true,
+        })
+        yield { type: 'tool_result', id: tu.id, name: tu.name, result: msg, isError: true }
+        continue
+      }
+
       const toolStart = Date.now()
       try {
         const output = await tool.execute(tu.input as never)

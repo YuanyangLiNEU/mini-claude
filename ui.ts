@@ -28,23 +28,25 @@ export const yellow = (s: string) => `${YELLOW}${s}${RESET}`
 export const cyan = (s: string) => `${CYAN}${s}${RESET}`
 export const gray = (s: string) => `${GRAY}${s}${RESET}`
 
-// --- CC-style symbols ---
-const CIRCLE = '●'
-const CURVE = '⎿'
+// --- Prefix symbols ---
+// Aligned gutter prefixes for tool I/O (Claude's text has no prefix).
+//   →  tool call (claude asked us to do something)
+//   ←  tool result (we told claude what happened)
+const TOOL_CALL_PREFIX = '→ '
+const TOOL_RESULT_PREFIX = '← '
 
 /**
- * Format a tool invocation line. Matches CC's `●  ToolName(args)` style.
+ * Format a tool invocation line.
  *
- * Example: `●  read_file(path: "/tmp/hello.txt")`
+ * Example: `→ read_file(path: "/tmp/hello.txt")`
  */
 export function formatToolCall(name: string, input: unknown): string {
   const args = renderArgsInline(input)
-  return `${bold(CIRCLE)}  ${bold(name)}(${args})`
+  return `${cyan(TOOL_CALL_PREFIX)}${bold(name)}(${args})`
 }
 
 /**
- * Format a tool result line. Matches CC's `  ⎿  <result>` style, dimmed.
- * Truncates long results.
+ * Format a tool result line. Dimmed; truncates long results.
  */
 export function formatToolResult(
   result: string,
@@ -57,7 +59,7 @@ export function formatToolResult(
       : result
   // Collapse newlines for the one-line preview
   const oneLine = truncated.replace(/\n/g, ' ')
-  const prefix = `  ${dim(CURVE)}  `
+  const prefix = isError ? red(TOOL_RESULT_PREFIX) : dim(TOOL_RESULT_PREFIX)
   return prefix + (isError ? red(oneLine) : dim(oneLine))
 }
 
