@@ -1,95 +1,146 @@
 /**
- * Interactive REPL — read user input, call Claude, stream response, loop.
+ * Interactive REPL — reads user input, runs the agent, renders events.
+ *
+ * Each user message is one invocation of runAgent(), which may make multiple
+ * API calls (e.g., Claude asks for a tool, we execute it, Claude responds).
  *
  * Commands:
- *   /clear   reset conversation history
- *   /history show current history length
- *   /model   switch model
- *   /exit    quit
+ *   /clear    reset conversation history
+ *   /history  show current history length
+ *   /model    get/set model
+ *   /tools    list available tools
+ *   /help     show commands
+ *   /exit     quit
  */
 
 import * as readline from 'node:readline/promises'
-import { stream } from './claude.ts'
-import { History } from './history.ts'
+import { runAgent } from './agent.ts'
+import { readFileTool } from './tools.ts'
+import type { ApiMessage } from './claude.ts'
+import { bold, cyan, dim, gray, red } from './ui.ts'
+import { formatToolCall, formatToolResult, formatHistory } from './ui.ts'
 
 const DEFAULT_SYSTEM =
-  'You are a helpful, concise assistant. Respond in plain text without unnecessary preamble.'
+  'You are a helpful, concise assistant. When the user asks about files, use the read_file tool. ' +
+  'Keep responses brief and direct.'
+
+const TOOLS = [readFileTool]
 
 async function main() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  const history = new History()
-  // Default to Haiku to stay comfortably under the 5h rate limit while learning.
-  // Switch with `/model claude-sonnet-4-6` when you want better quality.
+  const history: ApiMessage[] = []
   let model = 'claude-haiku-4-5'
 
-  console.log('mini-claude REPL')
-  console.log(`model: ${model}`)
-  console.log('type /exit to quit, /clear to reset, /help for commands\n')
+  console.log(bold('mini-claude REPL'))
+  console.log(dim(`model: ${model}`))
+  console.log(dim(`tools: ${TOOLS.map(t => t.name).join(', ')}`))
+  console.log(dim('type /help for commands, /exit to quit'))
+  console.log()
 
   while (true) {
-    const input = (await rl.question('❯ ')).trim()
+    const input = (await rl.question(cyan('❯ '))).trim()
     if (!input) continue
 
-    // --- Commands ---
+    // --- Slash commands (no API call) ---
     if (input === '/exit' || input === '/quit') break
     if (input === '/clear') {
-      history.clear()
-      console.log('history cleared.\n')
+      history.length = 0
+      console.log(dim('history cleared.\n'))
       continue
     }
     if (input === '/history') {
-      console.log(`history: ${history.length} messages\n`)
+      console.log(dim(`history: ${history.length} messages\n`))
       continue
     }
     if (input.startsWith('/model')) {
       const parts = input.split(/\s+/)
       if (parts.length === 2) {
         model = parts[1]!
-        console.log(`model set to: ${model}\n`)
+        console.log(dim(`model set to: ${model}\n`))
       } else {
-        console.log(`current model: ${model}\n`)
+        console.log(dim(`current model: ${model}\n`))
       }
+      continue
+    }
+    if (input === '/tools') {
+      for (const t of TOOLS) {
+        console.log(`  ${bold(t.name)} — ${t.description.split('.')[0]}`)
+      }
+      console.log()
       continue
     }
     if (input === '/help') {
       console.log('  /exit       quit')
       console.log('  /clear      reset conversation history')
       console.log('  /history    show history length')
-      console.log('  /model [m]  get/set model (e.g. /model claude-haiku-4-5)\n')
+      console.log('  /model [m]  get/set model (e.g. /model claude-haiku-4-5)')
+      console.log('  /tools      list available tools')
+      console.log('  /help       show this message\n')
       continue
     }
 
-    // --- User turn ---
-    history.addUser(input)
-
-    // --- Assistant turn: stream response ---
-    process.stdout.write('\n')
-    let assistantText = ''
+    // --- User turn: run the agent, render each event ---
+    console.log() // blank line between prompt and response
     try {
-      for await (const ev of stream({
-        prompt: history.all(),
+      for await (const ev of runAgent({
+        userInput: input,
+        history,
+        tools: TOOLS,
         system: DEFAULT_SYSTEM,
         model,
       })) {
-        if (ev.type === 'text') {
-          process.stdout.write(ev.text)
-          assistantText += ev.text
-        } else if (ev.type === 'done') {
-          // Show stop reason and usage subtly, on its own line
-          process.stdout.write(
-            `\n\n[${ev.stopReason}, in:${ev.usage.inputTokens} out:${ev.usage.outputTokens}]\n\n`,
-          )
+        switch (ev.type) {
+          case 'turn_start': {
+            // Show learning annotation at the start of each agent-loop iteration.
+            // "initial" = first call with the user's new message
+            // "tool_results" = follow-up call with tool results in history
+            const why = ev.reason === 'initial' ? 'user message' : 'tool results'
+            console.log(
+              gray(
+                `── turn ${ev.turnNum} · sending ${ev.historyMessages} msg${ev.historyMessages === 1 ? '' : 's'} to API (trigger: ${why}) ──`,
+              ),
+            )
+            // Dump the full history being sent (for learning)
+            console.log(formatHistory(history))
+            console.log()
+            break
+          }
+          case 'text':
+            process.stdout.write(ev.text)
+            break
+          case 'tool_call':
+            // newline before tool call (separates from any preceding text)
+            process.stdout.write('\n\n' + formatToolCall(ev.name, ev.input) + '\n')
+            break
+          case 'tool_result':
+            process.stdout.write(formatToolResult(ev.result, ev.isError) + '\n\n')
+            break
+          case 'turn_end':
+            console.log(
+              gray(
+                `\n── turn ended · stop=${ev.stopReason} · in:${ev.turnUsage.inputTokens} out:${ev.turnUsage.outputTokens}${ev.turnUsage.cacheReadTokens ? ` cached:${ev.turnUsage.cacheReadTokens}` : ''} ──`,
+              ),
+            )
+            break
+          case 'done':
+            console.log(
+              `\n${gray(`[done · ${ev.turns} turn${ev.turns === 1 ? '' : 's'} · total in:${ev.totalUsage.inputTokens} out:${ev.totalUsage.outputTokens}]`)}`,
+            )
+            console.log()
+            break
+          case 'error':
+            console.log(red(`\n[error] ${ev.message}\n`))
+            break
         }
       }
-      history.addAssistant(assistantText)
     } catch (err) {
-      // On error, don't poison history with a half-turn
-      console.error('\n[error]', err instanceof Error ? err.message : err, '\n')
+      console.error(red(`\n[error] ${err instanceof Error ? err.message : String(err)}`))
+      console.log()
     }
   }
 
   rl.close()
-  console.log('bye.')
+  console.log(dim('bye.'))
 }
 
 main()
