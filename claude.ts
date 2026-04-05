@@ -81,6 +81,27 @@ async function buildHeaders(): Promise<Record<string, string>> {
 }
 
 /**
+ * Build a clearer error message from a failed response, especially for 429s
+ * which happen often when learning.
+ */
+function buildApiError(response: Response, body: string): Error {
+  if (response.status === 429) {
+    const get = (k: string) =>
+      response.headers.get(`anthropic-ratelimit-unified-${k}`)
+    const util5h = get('5h-utilization')
+    const resetTs = get('5h-reset')
+    const resetDate = resetTs
+      ? new Date(Number(resetTs) * 1000).toLocaleTimeString()
+      : 'unknown'
+    return new Error(
+      `rate limited (429). 5h window at ${util5h}, resets ${resetDate}. ` +
+      `Try /model claude-haiku-4-5 (usually has more headroom).`
+    )
+  }
+  return new Error(`API error ${response.status}: ${body}`)
+}
+
+/**
  * Non-streaming completion. Returns once the full response is collected.
  */
 export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
@@ -92,7 +113,7 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
   })
 
   if (!response.ok) {
-    throw new Error(`API error ${response.status}: ${await response.text()}`)
+    throw buildApiError(response, await response.text())
   }
 
   const data = await response.json() as {
@@ -135,7 +156,7 @@ export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
   })
 
   if (!response.ok) {
-    throw new Error(`API error ${response.status}: ${await response.text()}`)
+    throw buildApiError(response, await response.text())
   }
   if (!response.body) {
     throw new Error('No response body')

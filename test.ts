@@ -15,8 +15,8 @@ const t1 = await complete({
 console.log('Answer:', t1.text)
 console.log('Usage:', t1.usage)
 
-// --- Test 2: with system prompt (Sonnet) ---
-console.log('\n--- Test 2: with system prompt (Sonnet) ---')
+// --- Test 2: with system prompt ---
+console.log('\n--- Test 2: with system prompt (Haiku) ---')
 const t2 = await complete({
   prompt: 'Write about autumn.',
   system: 'You are a haiku poet. Respond only with a single 5-7-5 haiku.',
