@@ -3,9 +3,10 @@
 A minimal Claude Code, built from scratch for learning.
 
 Direct Anthropic Messages API client + agent loop + tool calling + permission
-prompts + interactive REPL, written from scratch to understand how tools like
-Claude Code actually work. No SDK, no subprocess, no hidden system prompts —
-just `fetch`, async generators, and a tool-calling loop.
+prompts + interactive REPL + judge-based eval harness with web portal,
+written from scratch to understand how tools like Claude Code actually work.
+No SDK, no subprocess, no hidden system prompts — just `fetch`, async
+generators, and a tool-calling loop.
 
 Built alongside [claude-code source](https://github.com/anthropics/claude-code)
 as a reference — file-by-file comments point to the equivalent CC
@@ -116,7 +117,7 @@ debug.ts      — opt-in stderr logging with levels and subsystems
 | `repl.ts` | Interactive terminal loop. Reads input, dispatches slash commands, calls `runAgent()`, renders its event stream. | ~165 |
 | `test.ts` | Smoke test for the API client (no agent, no tools). | ~40 |
 
-Total: ~1,450 lines, zero runtime dependencies.
+Total: ~1,450 lines for core, plus ~1,000 lines of eval harness. Zero runtime dependencies.
 
 ### The agent loop
 
@@ -177,6 +178,76 @@ writes to stderr:
 ```
 
 Pipe stderr separately: `DEBUG=1 bun run repl.ts 2> debug.log`
+
+## Evaluation
+
+A judge-based eval harness under `eval/` probes whether mini-claude's
+current harness (tools + system prompt + agent loop) can accomplish
+concrete capability tasks.
+
+### Run the eval
+
+```sh
+bun run eval/runner.ts                       # all tasks
+bun run eval/runner.ts --only=write_file_capability
+bun run eval/runner.ts --model=claude-haiku-4-5
+```
+
+Each task runs the agent once, then spawns `claude -p --output-format json
+--json-schema ...` (using the real Claude Code CLI) as an **LLM judge**.
+The judge sees the user's goal, the list of concrete expectations, and the
+full trajectory (tool calls + final text). It returns a structured verdict
+of which expectations were met or missed.
+
+### Design
+
+No deterministic assertions. The judge is the sole evaluator — it verifies
+whether the **harness** (not the model) did what a reasonable user would
+expect:
+
+```typescript
+{
+  name: 'read_file_capability',
+  prompt: 'What does eval/sandbox/notes.txt contain?',
+  goal: 'Get the contents of eval/sandbox/notes.txt so the user can see it.',
+  expectations: [
+    'Agent calls read_file with the correct path',
+    "Agent's final response surfaces the actual file contents",
+  ],
+  setup: async () => { ... },    // create fixture files
+  cleanup: async () => { ... },  // remove them
+}
+```
+
+### Sandbox
+
+Tasks create fixture files in `eval/sandbox/` at setup and delete them at
+cleanup. Files live inside the repo so you can inspect them if needed.
+The directory is gitignored.
+
+### Judge logs
+
+Every run writes a JSONL file to `eval/runs/<timestamp>.jsonl` with the
+full judge prompt, response, trajectory, and verdict per task. Open the
+portal to browse:
+
+```sh
+bun run eval/portal.ts             # http://localhost:3333
+```
+
+The portal shows all past runs with a sidebar of timestamps, per-task
+verdict cards, expectation breakdowns, and collapsible trajectory +
+judge prompt views.
+
+### Eval files
+
+| File | Purpose | Lines |
+|---|---|---|
+| `eval/types.ts` | Task and run-metric type definitions | ~50 |
+| `eval/tasks.ts` | Task definitions: prompt, goal, expectations, setup/cleanup | ~130 |
+| `eval/judge.ts` | Spawns `claude -p` as judge, parses structured JSON verdict | ~175 |
+| `eval/runner.ts` | Runs each task, invokes judge, writes JSONL log | ~230 |
+| `eval/portal.ts` | Single-file web portal (Bun.serve) to browse run logs | ~430 |
 
 ## What's not here yet
 

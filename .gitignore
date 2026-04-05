@@ -32,3 +32,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Eval run logs
+eval/runs/
+
+# Eval sandbox (test fixtures created at task setup, deleted at cleanup)
+eval/sandbox/
