@@ -8,6 +8,9 @@
  */
 
 import { getAccessToken, OAUTH_BETA_HEADER } from './auth.ts'
+import { makeLogger } from './debug.ts'
+
+const log = makeLogger('api')
 
 const MESSAGES_URL = 'https://api.anthropic.com/v1/messages'
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -173,11 +176,27 @@ export async function complete(opts: CompleteOpts): Promise<CompleteResult> {
  * Streaming completion. Yields events as tokens arrive.
  */
 export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
+  const body = buildRequestBody(opts, true) as Record<string, unknown>
+  log.debug('POST /v1/messages (streaming)', {
+    model: body.model,
+    messages: Array.isArray(body.messages) ? body.messages.length : 0,
+    tools: Array.isArray(body.tools) ? body.tools.length : 0,
+    hasSystem: 'system' in body,
+  })
+  const startMs = Date.now()
+
   const response = await fetch(MESSAGES_URL, {
     method: 'POST',
     headers: await buildHeaders(),
-    body: JSON.stringify(buildRequestBody(opts, true)),
+    body: JSON.stringify(body),
     signal: opts.signal,
+  })
+
+  log.debug('response received', {
+    status: response.status,
+    elapsedMs: Date.now() - startMs,
+    claim: response.headers.get('anthropic-ratelimit-unified-representative-claim'),
+    util5h: response.headers.get('anthropic-ratelimit-unified-5h-utilization'),
   })
 
   if (!response.ok) {
@@ -238,6 +257,13 @@ export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
       if (event.usage?.output_tokens !== undefined) usage.outputTokens = event.usage.output_tokens
     }
   }
+
+  log.debug('stream complete', {
+    stopReason,
+    totalMs: Date.now() - startMs,
+    in: usage.inputTokens,
+    out: usage.outputTokens,
+  })
 
   yield { type: 'done', stopReason, usage }
 }

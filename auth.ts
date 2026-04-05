@@ -8,6 +8,9 @@
  */
 
 import { $ } from 'bun'
+import { makeLogger } from './debug.ts'
+
+const log = makeLogger('auth')
 
 // From claude-code src/constants/oauth.ts:91-99 (prod config)
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
@@ -83,16 +86,18 @@ export async function getAccessToken(): Promise<string> {
 
   // Refresh if expired or expiring soon
   const safetyWindowMs = 60_000
-  if (expiresAt > Date.now() + safetyWindowMs) {
+  const msRemaining = expiresAt - Date.now()
+  if (msRemaining > safetyWindowMs) {
+    log.debug('using cached token', { expiresInSec: Math.floor(msRemaining / 1000) })
     return accessToken
   }
 
-  console.error('[auth] Token expired or expiring soon, refreshing...')
+  log.info('token expired or expiring soon, refreshing')
   const refreshed = await refreshAccessToken(refreshToken)
   // Preserve subscriptionType from existing creds
   refreshed.subscriptionType = creds.claudeAiOauth.subscriptionType
   creds.claudeAiOauth = refreshed
   await writeKeychain(creds)
-  console.error('[auth] Token refreshed.')
+  log.info('token refreshed', { newExpiresInSec: Math.floor((refreshed.expiresAt - Date.now()) / 1000) })
   return refreshed.accessToken
 }

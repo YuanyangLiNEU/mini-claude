@@ -10,7 +10,10 @@
  */
 
 import { stream, type ApiMessage, type ContentBlock } from './claude.ts'
+import { makeLogger } from './debug.ts'
 import { findTool, stringifyToolResult, toolsToApiFormat, type AnyTool } from './tools.ts'
+
+const log = makeLogger('agent')
 
 /** Cumulative token usage across all API calls in this turn. */
 export type AgentUsage = {
@@ -66,6 +69,7 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
 
   while (turns < maxTurns) {
     turns++
+    log.debug('turn start', { turn: turns, historyLen: history.length, reason })
 
     // Log turn start so the REPL can show loop progression
     yield {
@@ -134,9 +138,12 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
 
     // 5. No tool calls → we're done
     if (toolUses.length === 0) {
+      log.debug('no tool_use — exiting loop', { turns, stopReason })
       yield { type: 'done', stopReason, turns, totalUsage }
       return
     }
+
+    log.debug('executing tools', { count: toolUses.length, names: toolUses.map(t => t.name) })
 
     // 6. Execute each tool, build tool_result blocks
     const resultBlocks: ContentBlock[] = []
@@ -153,9 +160,11 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
         yield { type: 'tool_result', id: tu.id, name: tu.name, result: msg, isError: true }
         continue
       }
+      const toolStart = Date.now()
       try {
         const output = await tool.execute(tu.input as never)
         const resultStr = stringifyToolResult(output)
+        log.debug('tool ok', { name: tu.name, elapsedMs: Date.now() - toolStart, bytes: resultStr.length })
         resultBlocks.push({
           type: 'tool_result',
           tool_use_id: tu.id,
@@ -164,6 +173,7 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
         yield { type: 'tool_result', id: tu.id, name: tu.name, result: resultStr, isError: false }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
+        log.warn('tool error', { name: tu.name, elapsedMs: Date.now() - toolStart, msg })
         resultBlocks.push({
           type: 'tool_result',
           tool_use_id: tu.id,
