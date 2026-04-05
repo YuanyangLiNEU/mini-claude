@@ -55,14 +55,12 @@ async function listRuns(): Promise<RunSummary[]> {
           const ev = JSON.parse(line)
           if (ev.type === 'run_start') {
             model = ev.model
-            judgeModel = ev.judgeModel
+            judgeModel = ev.evaluatorModel ?? ev.judgeModel
           } else if (ev.type === 'task_result') {
             taskCount++
-            if (ev.judge?.verdict?.verdict === 'pass') passed++
+            if (ev.outcome === 'goal_met') passed++
+            else if (ev.outcome === 'error') errors++
             else failed++
-          } else if (ev.type === 'task_error' || ev.type === 'judge_error') {
-            taskCount++
-            errors++
           }
         } catch {
           // skip malformed lines
@@ -283,109 +281,167 @@ const INDEX_HTML = `<!DOCTYPE html>
   function renderRun(events) {
     const runStart = events.find(e => e.type === 'run_start');
     const taskResults = events.filter(e => e.type === 'task_result');
-    const taskErrors = events.filter(e => e.type === 'task_error' || e.type === 'judge_error');
 
-    const totalTasks = taskResults.length + taskErrors.length;
-    const passed = taskResults.filter(t => t.judge?.verdict?.verdict === 'pass').length;
-    const failed = taskResults.filter(t => t.judge?.verdict?.verdict === 'fail').length;
-    const totalMet = taskResults.reduce((s, t) => s + (t.judge?.verdict?.expectations_met?.length || 0), 0);
-    const totalMissed = taskResults.reduce((s, t) => s + (t.judge?.verdict?.expectations_missed?.length || 0), 0);
-    const totalTurns = taskResults.reduce((s, t) => s + (t.metrics?.turns || 0), 0);
-    const totalIn = taskResults.reduce((s, t) => s + (t.metrics?.inputTokens || 0), 0);
-    const totalOut = taskResults.reduce((s, t) => s + (t.metrics?.outputTokens || 0), 0);
+    const totalTasks = taskResults.length;
+    const goalsMet = taskResults.filter(t => t.outcome === 'goal_met').length;
+    const totalTurns = taskResults.reduce((s, t) => s + (t.metrics?.conversationTurns || 0), 0);
+    const totalIn = taskResults.reduce((s, t) => s + (t.metrics?.miniClaudeInputTokens || 0), 0);
+    const totalOut = taskResults.reduce((s, t) => s + (t.metrics?.miniClaudeOutputTokens || 0), 0);
     const totalMs = taskResults.reduce((s, t) => s + (t.metrics?.wallMs || 0), 0);
 
     let html = '';
 
-    // Meta bar
     if (runStart) {
       html += '<div class="meta-bar">';
       html += '<div class="meta-chip"><strong>' + esc(runStart.timestamp?.slice(0,19).replace('T',' ') ?? '') + '</strong></div>';
-      html += '<div class="meta-chip">agent: <strong>' + esc(runStart.model) + '</strong></div>';
-      html += '<div class="meta-chip">judge: <strong>' + esc(runStart.judgeModel) + '</strong></div>';
+      html += '<div class="meta-chip">mini-claude: <strong>' + esc(runStart.model) + '</strong></div>';
+      html += '<div class="meta-chip">evaluator: <strong>' + esc(runStart.evaluatorModel || runStart.judgeModel) + '</strong></div>';
       html += '<div class="meta-chip"><strong>' + totalTasks + '</strong> task' + (totalTasks === 1 ? '' : 's') + '</div>';
       html += '</div>';
     }
 
-    // Score grid
-    const passColor = passed === totalTasks ? 'var(--green)' : 'var(--amber)';
+    const passColor = goalsMet === totalTasks ? 'var(--green)' : 'var(--amber)';
     html += '<div class="score-grid">';
-    html += '<div class="score-card"><div class="score-label">Verdict</div><div class="score-value" style="color:' + passColor + '">' + passed + '/' + totalTasks + '</div><div class="score-sub">tasks passed</div></div>';
-    html += '<div class="score-card"><div class="score-label">Expectations</div><div class="score-value">' + totalMet + '<span style="font-size:18px; color:var(--muted); font-weight:500;"> / ' + (totalMet + totalMissed) + '</span></div><div class="score-sub">' + totalMissed + ' missed</div></div>';
-    html += '<div class="score-card"><div class="score-label">Tokens</div><div class="score-value" style="font-size:22px;">' + (totalIn/1000).toFixed(1) + 'k<span style="font-size:14px; color:var(--muted);"> in</span></div><div class="score-sub">' + totalOut + ' output · ' + totalTurns + ' turns</div></div>';
-    html += '<div class="score-card"><div class="score-label">Wall time</div><div class="score-value">' + (totalMs/1000).toFixed(1) + '<span style="font-size:14px; color:var(--muted);">s</span></div><div class="score-sub">agent only</div></div>';
+    html += '<div class="score-card"><div class="score-label">Goals met</div><div class="score-value" style="color:' + passColor + '">' + goalsMet + '/' + totalTasks + '</div><div class="score-sub">tasks successful</div></div>';
+    html += '<div class="score-card"><div class="score-label">Conversation</div><div class="score-value">' + totalTurns + '</div><div class="score-sub">turns total</div></div>';
+    html += '<div class="score-card"><div class="score-label">Tokens</div><div class="score-value" style="font-size:22px;">' + (totalIn/1000).toFixed(1) + 'k<span style="font-size:14px; color:var(--muted);"> in</span></div><div class="score-sub">' + totalOut + ' output (mini-claude only)</div></div>';
+    html += '<div class="score-card"><div class="score-label">Wall time</div><div class="score-value">' + (totalMs/1000).toFixed(1) + '<span style="font-size:14px; color:var(--muted);">s</span></div><div class="score-sub">conversation + evaluator</div></div>';
     html += '</div>';
 
-    // Task cards
     html += '<section><h2 class="section">Tasks</h2>';
     for (const t of taskResults) html += renderTaskCard(t);
-    for (const t of taskErrors) html += renderErrorCard(t);
     html += '</section>';
 
     return html;
   }
 
   function renderTaskCard(t) {
-    const v = t.judge?.verdict;
-    const verdictClass = v?.verdict === 'pass' ? 'pass' : 'fail';
-    const met = v?.expectations_met || [];
-    const missed = v?.expectations_missed || [];
+    const outcomeClass = t.outcome === 'goal_met' ? 'pass' : 'fail';
+    const outcomeLabel = (t.outcome || 'unknown').replace(/_/g, ' ');
 
     let html = '<div class="task-card">';
     html += '<div class="task-header">';
     html += '<div class="task-name">' + esc(t.task) + '</div>';
-    html += '<div class="verdict-badge ' + verdictClass + '">' + esc(v?.verdict || 'unknown') + '</div>';
+    html += '<div class="verdict-badge ' + outcomeClass + '">' + esc(outcomeLabel) + '</div>';
     html += '</div>';
 
+    const permCount = (t.turns || []).filter(tt => tt.permissionEvent).length;
     html += '<div class="task-meta">';
-    html += '<span><strong>' + (t.metrics?.turns ?? '?') + '</strong> turns</span>';
-    html += '<span><strong>' + (t.metrics?.inputTokens ?? '?') + '</strong> in</span>';
-    html += '<span><strong>' + (t.metrics?.outputTokens ?? '?') + '</strong> out</span>';
+    html += '<span><strong>' + (t.metrics?.conversationTurns ?? '?') + '</strong> turns</span>';
+    if (permCount > 0) {
+      html += '<span><strong>' + permCount + '</strong> permission prompt' + (permCount === 1 ? '' : 's') + '</span>';
+    }
+    html += '<span><strong>' + (t.metrics?.miniClaudeInputTokens ?? 0) + '</strong> in</span>';
+    html += '<span><strong>' + (t.metrics?.miniClaudeOutputTokens ?? 0) + '</strong> out</span>';
     html += '<span><strong>' + ((t.metrics?.wallMs ?? 0)/1000).toFixed(1) + 's</strong></span>';
     html += '</div>';
 
-    html += '<div class="task-goal">"' + esc(t.prompt) + '" → ' + esc(t.goal) + '</div>';
+    html += '<div class="task-goal">' + esc(t.goal) + '</div>';
 
-    html += '<div class="expectations"><ul class="exp-list">';
-    for (const e of met) html += '<li><span class="exp-mark pass">✓</span><span>' + esc(e) + '</span></li>';
-    for (const e of missed) html += '<li><span class="exp-mark fail">✗</span><span>' + esc(e) + '</span></li>';
-    html += '</ul></div>';
+    // Setup + persona (environment the evaluator operates in)
+    if (t.setupDescription) {
+      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px; padding:6px 10px; background:var(--bg); border-radius:6px;"><strong>setup:</strong> ' + esc(t.setupDescription) + '</div>';
+    }
+    if (t.persona) {
+      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px; padding:6px 10px; background:var(--bg); border-radius:6px;"><strong>persona:</strong> ' + esc(t.persona) + '</div>';
+    }
 
-    if (v?.reasoning) html += '<div class="reasoning">' + esc(v.reasoning) + '</div>';
-
-    // Collapsed trajectory
-    html += '<details><summary>Trajectory</summary>';
-    const toolCalls = t.trajectory?.toolCalls || [];
-    if (toolCalls.length > 0) {
-      for (const tc of toolCalls) {
-        html += '<div class="tool-call-row"><span class="tool-call-name">' + esc(tc.name) + '</span>(' + esc(JSON.stringify(tc.input)) + ')</div>';
+    // Success criteria
+    if (t.successCriteria?.length) {
+      html += '<div class="expectations"><ul class="exp-list">';
+      for (const c of t.successCriteria) {
+        html += '<li><span class="exp-mark" style="color:var(--muted);">·</span><span>' + esc(c) + '</span></li>';
       }
-    } else {
-      html += '<div class="tool-call-row" style="color:var(--muted); font-style:italic;">no tool calls</div>';
+      html += '</ul></div>';
     }
-    if (t.trajectory?.finalText) {
-      html += '<pre class="code-block" style="margin-top:8px;">' + esc(t.trajectory.finalText) + '</pre>';
-    }
-    html += '</details>';
 
-    // Collapsed judge prompt
-    if (t.judge?.prompt) {
-      html += '<details><summary>Judge prompt</summary>';
-      html += '<pre class="code-block">' + esc(t.judge.prompt) + '</pre>';
-      html += '</details>';
-    }
+    if (t.finalSummary) html += '<div class="reasoning">' + esc(t.finalSummary) + '</div>';
+    if (t.giveUpReason) html += '<div class="reasoning" style="border-left-color:var(--amber);">Gave up: ' + esc(t.giveUpReason) + '</div>';
+    if (t.errorMessage) html += '<div class="reasoning" style="border-left-color:var(--red);">Error: ' + esc(t.errorMessage) + '</div>';
+
+    // Conversation turns
+    html += '<details><summary>Conversation (' + (t.turns?.length || 0) + ' turns)</summary>';
+    html += renderConversation(t);
+    html += '</details>';
 
     html += '</div>';
     return html;
   }
 
-  function renderErrorCard(t) {
-    let html = '<div class="task-card">';
-    html += '<div class="task-header">';
-    html += '<div class="task-name">' + esc(t.task) + '</div>';
-    html += '<div class="verdict-badge fail">' + esc(t.type === 'task_error' ? 'agent error' : 'judge error') + '</div>';
-    html += '</div>';
-    html += '<div class="reasoning" style="border-left-color:var(--red);">' + esc(t.error) + '</div>';
+  function renderConversation(t) {
+    if (!t.turns?.length) return '<div class="tool-call-row" style="color:var(--muted); font-style:italic;">no turns</div>';
+    let html = '';
+    let userMsg = t.openingMessage;
+    for (const turn of t.turns) {
+      html += '<div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">';
+      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px;">TURN ' + turn.turnNum + '</div>';
+
+      html += '<div style="margin-bottom:8px; padding:8px 10px; background:var(--sky-light); border-radius:8px; font-size:12px;">';
+      html += '<strong style="color:var(--sky-text);">👤 user:</strong> ' + esc(userMsg);
+      html += '</div>';
+
+      // Render mini-claude actions in order. When we hit the tool_call that
+      // triggered a permission event (matched by tool name + input), insert
+      // the permission prompt/decision inline — that's where it chronologically
+      // happens (the agent loop pauses there before tool_result arrives).
+      const perm = turn.permissionEvent;
+      const permInputStr = perm ? JSON.stringify(perm.toolInput) : '';
+      let permInserted = false;
+
+      for (const a of turn.miniClaudeActions || []) {
+        if (a.type === 'text') {
+          html += '<div style="padding:4px 10px; font-size:12px; line-height:1.5;">' + esc(a.text.replace(/\\n/g, ' ')) + '</div>';
+        } else if (a.type === 'tool_call') {
+          html += '<div class="tool-call-row"><span class="tool-call-name">→ ' + esc(a.name) + '</span>(' + esc(JSON.stringify(a.input).slice(0,200)) + ')</div>';
+          // If this tool_call triggered the permission prompt, render it right after
+          if (perm && !permInserted && a.name === perm.toolName && JSON.stringify(a.input) === permInputStr) {
+            html += renderPermissionBlock(perm);
+            permInserted = true;
+          }
+        } else if (a.type === 'tool_result') {
+          const color = a.isError ? 'var(--red-text)' : 'var(--muted)';
+          html += '<div class="tool-call-row" style="color:' + color + '; font-size:11px;">← ' + esc(a.result.replace(/\\n/g,' ').slice(0,200)) + '</div>';
+        }
+      }
+      // Fallback: if we didn't match the tool call (shouldn't happen), render
+      // the permission at the end so it's still visible.
+      if (perm && !permInserted) html += renderPermissionBlock(perm);
+
+      // Evaluator decision
+      const d = turn.evaluatorDecision;
+      if (d) {
+        html += '<div style="margin-top:8px; padding:8px 10px; background:var(--bg); border-radius:8px; font-size:12px; border-left:3px solid var(--sky);">';
+        html += '<div style="font-style:italic; color:var(--muted);">💭 ' + esc(d.thinking) + '</div>';
+        if (d.action === 'goal_met') {
+          html += '<div style="margin-top:4px; color:var(--green-text); font-weight:600;">✓ goal met — ' + esc(d.summary) + '</div>';
+        } else if (d.action === 'give_up') {
+          html += '<div style="margin-top:4px; color:var(--amber-text); font-weight:600;">✗ give up — ' + esc(d.reason) + '</div>';
+        } else if (d.action === 'send_message') {
+          html += '<div style="margin-top:4px; color:var(--sky-text);">➜ reply: "' + esc(d.message) + '"</div>';
+        }
+        html += '</div>';
+
+        // Set up next user message for next turn
+        if (d.action === 'send_message') userMsg = d.message;
+      }
+
+      html += '</div>';
+    }
+    return html;
+  }
+
+  function renderPermissionBlock(p) {
+    const approved = p.decision === 'approve';
+    const accent = approved ? 'var(--green)' : 'var(--red)';
+    const bg = approved ? 'var(--green-bg)' : 'var(--red-bg)';
+    const border = approved ? 'var(--green-border)' : 'var(--red-border)';
+    const mark = approved ? '✓ APPROVED' : '✗ DENIED';
+    let html = '<div style="margin:6px 0 6px 20px; padding:10px 12px; background:' + bg + '; border:1px solid ' + border + '; border-left:4px solid ' + accent + '; border-radius:8px; font-size:12px;">';
+    html += '<div style="font-weight:700; color:' + accent + '; text-transform:uppercase; letter-spacing:0.4px; font-size:10px; margin-bottom:6px;">⚠ PERMISSION PROMPT</div>';
+    html += '<div style="font-weight:600;">' + esc(p.toolName) + '(' + esc(JSON.stringify(p.toolInput).slice(0,160)) + ')</div>';
+    html += '<div style="font-style:italic; color:var(--muted); margin-top:6px;">💭 user thinking: ' + esc(p.evaluatorThinking) + '</div>';
+    html += '<div style="margin-top:6px; font-weight:700; color:' + accent + ';">' + mark + '</div>';
+    if (p.evaluatorWhy) html += '<div style="margin-top:4px; color:var(--muted);">' + esc(p.evaluatorWhy) + '</div>';
     html += '</div>';
     return html;
   }

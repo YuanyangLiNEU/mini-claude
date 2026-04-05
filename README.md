@@ -3,7 +3,7 @@
 A minimal Claude Code, built from scratch for learning.
 
 Direct Anthropic Messages API client + agent loop + tool calling + permission
-prompts + interactive REPL + judge-based eval harness with web portal,
+prompts + interactive REPL + conversational eval harness with web portal,
 written from scratch to understand how tools like Claude Code actually work.
 No SDK, no subprocess, no hidden system prompts — just `fetch`, async
 generators, and a tool-calling loop.
@@ -117,7 +117,7 @@ debug.ts      — opt-in stderr logging with levels and subsystems
 | `repl.ts` | Interactive terminal loop. Reads input, dispatches slash commands, calls `runAgent()`, renders its event stream. | ~165 |
 | `test.ts` | Smoke test for the API client (no agent, no tools). | ~40 |
 
-Total: ~1,450 lines for core, plus ~1,000 lines of eval harness. Zero runtime dependencies.
+Total: ~1,450 lines for core, plus ~1,550 lines of eval harness. Zero runtime dependencies.
 
 ### The agent loop
 
@@ -181,73 +181,111 @@ Pipe stderr separately: `DEBUG=1 bun run repl.ts 2> debug.log`
 
 ## Evaluation
 
-A judge-based eval harness under `eval/` probes whether mini-claude's
+A conversational eval harness under `eval/` probes whether mini-claude's
 current harness (tools + system prompt + agent loop) can accomplish
-concrete capability tasks.
+concrete tasks that a real user would ask for.
+
+### How it works
+
+For each task, the runner starts a **two-agent conversation**:
+
+- **mini-claude** — the system under test, with its real tools, real agent
+  loop, and real permission gate
+- **evaluator** — a simulated user, backed by Claude Sonnet via
+  `claude -p --output-format json`, driving the conversation
+
+At each turn, the evaluator sees what mini-claude just did (tool calls,
+text responses) and decides what to do next: declare the goal met, give
+up, or send a follow-up message. When mini-claude calls a dangerous tool,
+the evaluator decides whether to approve or deny — playing the role of
+the real user.
+
+You see the evaluator's **thinking** at every decision point.
 
 ### Run the eval
 
 ```sh
-bun run eval/runner.ts                       # all tasks
-bun run eval/runner.ts --only=write_file_capability
-bun run eval/runner.ts --model=claude-haiku-4-5
+bun run eval/runner.ts                              # all tasks
+bun run eval/runner.ts --only=write_file_approved   # single task
+bun run eval/runner.ts --list                       # list task names
+bun run eval/runner.ts --model=claude-haiku-4-5     # override mini-claude's model
 ```
 
-Each task runs the agent once, then spawns `claude -p --output-format json
---json-schema ...` (using the real Claude Code CLI) as an **LLM judge**.
-The judge sees the user's goal, the list of concrete expectations, and the
-full trajectory (tool calls + final text). It returns a structured verdict
-of which expectations were met or missed.
-
-### Design
-
-No deterministic assertions. The judge is the sole evaluator — it verifies
-whether the **harness** (not the model) did what a reasonable user would
-expect:
+### Task shape
 
 ```typescript
 {
-  name: 'read_file_capability',
-  prompt: 'What does eval/sandbox/notes.txt contain?',
-  goal: 'Get the contents of eval/sandbox/notes.txt so the user can see it.',
-  expectations: [
-    'Agent calls read_file with the correct path',
-    "Agent's final response surfaces the actual file contents",
+  name: 'delete_file_capability',
+  goal: `Get ${SANDBOX}/old.txt deleted from disk`,
+  successCriteria: [
+    'mini-claude called a tool to delete the file',
+    'you approved the deletion when asked for permission',
+    'mini-claude confirmed the file was deleted',
+    'the file no longer exists on disk',
   ],
-  setup: async () => { ... },    // create fixture files
-  cleanup: async () => { ... },  // remove them
+  openingMessage: `Please delete ${SANDBOX}/old.txt — I don't need it anymore.`,
+  persona: `You want the file gone — approve the deletion when asked.`,
+  setupDescription: `created ${SANDBOX}/old.txt with content "goodbye"`,
+  setup: async () => { ... },
+  cleanup: async () => { ... },
 }
+```
+
+- **goal**: what the simulated user wants to accomplish
+- **successCriteria**: concrete behaviors the evaluator watches for
+- **openingMessage**: the first thing the user says
+- **persona**: colors the evaluator's permission decisions and patience
+
+### TDD workflow
+
+```sh
+# 1. Add a new task for a capability you want to add
+# 2. Expect failure: mini-claude can't do it yet
+bun run eval/runner.ts --only=my_new_task
+
+# 3. Implement the feature in mini-claude
+# 4. Expect pass now:
+bun run eval/runner.ts --only=my_new_task
+
+# 5. Make sure nothing else regressed
+bun run eval/runner.ts
 ```
 
 ### Sandbox
 
 Tasks create fixture files in `eval/sandbox/` at setup and delete them at
-cleanup. Files live inside the repo so you can inspect them if needed.
-The directory is gitignored.
+cleanup. The directory is inside the repo so you can inspect it, and
+gitignored so nothing gets committed.
 
-### Judge logs
-
-Every run writes a JSONL file to `eval/runs/<timestamp>.jsonl` with the
-full judge prompt, response, trajectory, and verdict per task. Open the
-portal to browse:
+### Portal
 
 ```sh
 bun run eval/portal.ts             # http://localhost:3333
 ```
 
-The portal shows all past runs with a sidebar of timestamps, per-task
-verdict cards, expectation breakdowns, and collapsible trajectory +
-judge prompt views.
+Single-file web UI to browse run logs. Shows per-run summary cards, then
+expand each task to see the full turn-by-turn conversation: user
+messages, mini-claude's actions (tool calls + results + text), permission
+prompts inline in chronological order, and the evaluator's thinking at
+each step.
+
+### Logs
+
+Every run writes a JSONL file to `eval/runs/<timestamp>.jsonl` with the
+full conversation trajectory for each task — every user message, every
+mini-claude action, every permission decision with the evaluator's
+thinking, and the final outcome.
 
 ### Eval files
 
 | File | Purpose | Lines |
 |---|---|---|
-| `eval/types.ts` | Task and run-metric type definitions | ~50 |
-| `eval/tasks.ts` | Task definitions: prompt, goal, expectations, setup/cleanup | ~130 |
-| `eval/judge.ts` | Spawns `claude -p` as judge, parses structured JSON verdict | ~175 |
-| `eval/runner.ts` | Runs each task, invokes judge, writes JSONL log | ~230 |
-| `eval/portal.ts` | Single-file web portal (Bun.serve) to browse run logs | ~430 |
+| `eval/types.ts` | Task, turn, and conversation type definitions | ~100 |
+| `eval/tasks.ts` | Task definitions (goal, criteria, opening message, persona) | ~175 |
+| `eval/evaluator.ts` | Simulated user: LLM-backed decisions via `claude -p` | ~290 |
+| `eval/conversation.ts` | Orchestrates back-and-forth between evaluator and mini-claude | ~250 |
+| `eval/runner.ts` | Iterates tasks, prints events live, writes JSONL log | ~240 |
+| `eval/portal.ts` | Single-file web portal (Bun.serve) to browse run logs | ~490 |
 
 ## What's not here yet
 
