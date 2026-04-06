@@ -4,23 +4,27 @@
 
 [Claude Code](https://github.com/anthropics/claude-code) is 500K+ lines of
 production TypeScript. This project strips it down to the essential architecture
-— tool calling, streaming, permissions, web search, and a black-box eval
-harness — in the simplest code possible.
+in the simplest code possible. No SDK. No hidden system prompts. Just `fetch`,
+async generators, and a tool-calling loop.
 
-No SDK. No hidden system prompts. Just `fetch`, async generators, and a
-tool-calling loop.
+**Built with eval-driven development.** Every new capability starts as a
+failing eval task. An LLM evaluator (Claude Sonnet) drives mini-claude through
+stdin/stdout — typing messages, approving permissions, judging answers —
+exactly like a human sitting at the terminal. The eval is a complete black box:
+no imports from mini-claude internals, no mocking, no shortcuts. Write the
+test, implement the feature, watch it pass.
 
 ## Why this exists
 
 Claude Code is 500K+ lines of production code. This project distills the core
 architecture into something you can read in an afternoon:
 
+- **Black-box eval harness** — LLM-as-user drives the real REPL via subprocess stdin/stdout
 - **Direct API client** — raw `fetch` to `/v1/messages` with SSE streaming
 - **Agent loop** — async generator that yields events as tools execute
 - **Tool calling** — Claude decides which tools to use, you execute them locally
 - **Server-side tools** — Anthropic's built-in web search, no parsing needed
 - **Permission system** — dangerous tools require interactive approval
-- **Black-box eval** — an LLM evaluator drives mini-claude through stdin/stdout, exactly like a human would
 
 Every file has comments pointing to the equivalent Claude Code source for comparison.
 
