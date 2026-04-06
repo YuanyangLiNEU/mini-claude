@@ -211,7 +211,21 @@ async function main() {
     process.exit(0)
   }
 
-  const tasks = onlyName ? TASKS.filter(t => t.name === onlyName) : TASKS
+  // --only supports exact name, prefix with wildcard (web_search*), or comma-separated
+  let tasks: Task[]
+  if (onlyName) {
+    if (onlyName.includes(',')) {
+      const names = onlyName.split(',')
+      tasks = TASKS.filter(t => names.includes(t.name))
+    } else if (onlyName.endsWith('*')) {
+      const prefix = onlyName.slice(0, -1)
+      tasks = TASKS.filter(t => t.name.startsWith(prefix))
+    } else {
+      tasks = TASKS.filter(t => t.name === onlyName)
+    }
+  } else {
+    tasks = TASKS
+  }
   if (tasks.length === 0) {
     console.error(red(`no tasks matched --only=${onlyName}`))
     console.error(dim('Available tasks:'))

@@ -26,11 +26,18 @@ export type Usage = {
   cacheReadTokens: number
 }
 
-/** A tool schema the API needs — shape matches Anthropic's API tool format. */
+/** A client tool schema — Claude returns tool_use, we execute locally. */
 export type ApiTool = {
   name: string
   description: string
   input_schema: { type: 'object'; properties: Record<string, unknown>; required?: string[] }
+}
+
+/** A server tool schema — the API executes it server-side (e.g. web search). */
+export type ServerTool = {
+  type: string       // e.g. 'web_search_20250305'
+  name: string       // e.g. 'web_search'
+  max_uses?: number  // optional cap per response
 }
 
 export type CompleteOpts = {
@@ -42,8 +49,10 @@ export type CompleteOpts = {
   model?: string
   /** Max output tokens (default: 4096) */
   maxTokens?: number
-  /** Tool schemas to make available to Claude */
+  /** Client tool schemas (we execute locally) */
   tools?: ApiTool[]
+  /** Server tool schemas (API executes server-side, e.g. web search) */
+  serverTools?: ServerTool[]
   /** Abort signal to cancel mid-request */
   signal?: AbortSignal
 }
@@ -53,12 +62,17 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  // Server-side tool blocks — preserved in history so the API sees them on the next turn
+  | { type: 'server_tool_use'; id: string; name: string; input: unknown; [key: string]: unknown }
+  | { type: 'web_search_tool_result'; tool_use_id: string; content: unknown[]; [key: string]: unknown }
 
 export type ApiMessage = { role: Role; content: ContentBlock[] }
 
 export type StreamEvent =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'server_tool_use'; id: string; name: string; input: unknown }
+  | { type: 'server_tool_result'; id: string; content: unknown[] }
   | { type: 'done'; stopReason: string; usage: Usage }
 
 export type CompleteResult = {
@@ -94,7 +108,11 @@ function buildRequestBody(opts: CompleteOpts, stream: boolean): object {
     stream,
   }
   if (opts.system) body.system = opts.system
-  if (opts.tools && opts.tools.length > 0) body.tools = opts.tools
+  // Merge client tools and server tools into a single tools array
+  const allTools: unknown[] = []
+  if (opts.tools) allTools.push(...opts.tools)
+  if (opts.serverTools) allTools.push(...opts.serverTools)
+  if (allTools.length > 0) body.tools = allTools
   return body
 }
 
@@ -218,19 +236,31 @@ export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
   // Partial tool_use state, indexed by content block index. Tool input JSON
   // arrives in fragments across multiple input_json_delta events, so we
   // accumulate then emit once the block closes.
-  const partialTools: Record<number, { id: string; name: string; json: string }> = {}
+  const partialTools: Record<number, { id: string; name: string; json: string; isServer: boolean }> = {}
+
+  // Server tool results (e.g. web_search_tool_result) — captured at
+  // content_block_start and emitted at content_block_stop.
+  const serverResults: Record<number, { id: string; content: unknown[] }> = {}
 
   for await (const event of parseSSE(response.body)) {
     if (event.type === 'message_start' && event.message?.usage) {
       usage.inputTokens = event.message.usage.input_tokens ?? 0
       usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens ?? 0
       usage.cacheReadTokens = event.message.usage.cache_read_input_tokens ?? 0
-    } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-      if (event.index !== undefined) {
+    } else if (event.type === 'content_block_start') {
+      const block = event.content_block
+      if (block?.type === 'tool_use' && event.index !== undefined) {
         partialTools[event.index] = {
-          id: event.content_block.id ?? '',
-          name: event.content_block.name ?? '',
-          json: '',
+          id: block.id ?? '', name: block.name ?? '', json: '', isServer: false,
+        }
+      } else if (block?.type === 'server_tool_use' && event.index !== undefined) {
+        partialTools[event.index] = {
+          id: block.id ?? '', name: block.name ?? '', json: '', isServer: true,
+        }
+      } else if (block?.type === 'web_search_tool_result' && event.index !== undefined) {
+        serverResults[event.index] = {
+          id: block.tool_use_id ?? '',
+          content: block.content ?? [],
         }
       }
     } else if (event.type === 'content_block_delta') {
@@ -249,8 +279,17 @@ export async function* stream(opts: CompleteOpts): AsyncGenerator<StreamEvent> {
         } catch {
           input = { __parse_error: pt.json }
         }
-        yield { type: 'tool_use', id: pt.id, name: pt.name, input }
+        if (pt.isServer) {
+          yield { type: 'server_tool_use', id: pt.id, name: pt.name, input }
+        } else {
+          yield { type: 'tool_use', id: pt.id, name: pt.name, input }
+        }
         delete partialTools[event.index]
+      }
+      const sr = serverResults[event.index]
+      if (sr) {
+        yield { type: 'server_tool_result', id: sr.id, content: sr.content }
+        delete serverResults[event.index]
       }
     } else if (event.type === 'message_delta') {
       if (event.delta?.stop_reason) stopReason = event.delta.stop_reason
@@ -292,6 +331,8 @@ type SSEEvent = {
     id?: string
     name?: string
     input?: unknown
+    tool_use_id?: string
+    content?: unknown[]
   }
   delta?: {
     type?: string

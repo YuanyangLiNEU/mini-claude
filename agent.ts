@@ -9,7 +9,7 @@
  * streaming tool execution, retries, etc. Ours: sequential tool execution only.
  */
 
-import { stream, type ApiMessage, type ContentBlock } from './claude.ts'
+import { stream, type ApiMessage, type ContentBlock, type ServerTool } from './claude.ts'
 import { makeLogger } from './debug.ts'
 import { allowAll, type CanUseTool } from './permissions.ts'
 import { findTool, stringifyToolResult, toolsToApiFormat, type AnyTool } from './tools.ts'
@@ -36,6 +36,8 @@ export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; name: string; result: string; isError: boolean }
+  | { type: 'server_tool_call'; id: string; name: string; input: unknown }
+  | { type: 'server_tool_result'; id: string }
   | { type: 'turn_end'; stopReason: string; turnUsage: AgentUsage }
   | { type: 'done'; stopReason: string; turns: number; totalUsage: AgentUsage }
   | { type: 'error'; message: string }
@@ -44,6 +46,8 @@ export type RunAgentOpts = {
   userInput: string
   history: ApiMessage[] // mutated: user msg + assistant reply(ies) + tool results appended
   tools: AnyTool[]
+  /** Server-side tools (e.g. web search) — API executes these, not us. */
+  serverTools?: ServerTool[]
   system?: string
   model?: string
   /** Safety cap on agent iterations (each = one API call). Default: 10. */
@@ -57,7 +61,7 @@ export type RunAgentOpts = {
 }
 
 export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> {
-  const { userInput, history, tools, system, model } = opts
+  const { userInput, history, tools, serverTools, system, model } = opts
   const maxTurns = opts.maxTurns ?? 10
   const canUseTool = opts.canUseTool ?? allowAll
 
@@ -102,6 +106,7 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
       system,
       model,
       tools: apiTools,
+      serverTools,
     })) {
       if (ev.type === 'text') {
         currentTextBuffer += ev.text
@@ -120,6 +125,30 @@ export async function* runAgent(opts: RunAgentOpts): AsyncGenerator<AgentEvent> 
         })
         toolUses.push({ id: ev.id, name: ev.name, input: ev.input })
         yield { type: 'tool_call', id: ev.id, name: ev.name, input: ev.input }
+      } else if (ev.type === 'server_tool_use') {
+        // Server-side tool (e.g. web search) — API executes it, not us.
+        // Flush text, add to history as server_tool_use (NOT tool_use — the API
+        // needs to see the original type), and do NOT add to toolUses.
+        if (currentTextBuffer) {
+          assistantBlocks.push({ type: 'text', text: currentTextBuffer })
+          currentTextBuffer = ''
+        }
+        assistantBlocks.push({
+          type: 'server_tool_use',
+          id: ev.id,
+          name: ev.name,
+          input: ev.input,
+        })
+        yield { type: 'server_tool_call', id: ev.id, name: ev.name, input: ev.input }
+      } else if (ev.type === 'server_tool_result') {
+        // Server tool result — add to assistant blocks so history is complete.
+        // The API needs to see the matching result for the server_tool_use.
+        assistantBlocks.push({
+          type: 'web_search_tool_result',
+          tool_use_id: ev.id,
+          content: ev.content,
+        })
+        yield { type: 'server_tool_result', id: ev.id }
       } else if (ev.type === 'done') {
         // Flush any trailing text
         if (currentTextBuffer) {

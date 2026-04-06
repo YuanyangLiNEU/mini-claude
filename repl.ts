@@ -17,16 +17,37 @@ import * as readline from 'node:readline/promises'
 import { runAgent } from './agent.ts'
 import { createInteractivePermissions } from './permissions.ts'
 import { deleteFileTool, readFileTool, listFilesTool, writeFileTool } from './tools.ts'
-import type { ApiMessage } from './claude.ts'
+import type { ApiMessage, ServerTool } from './claude.ts'
 import { bold, cyan, dim, gray, red } from './ui.ts'
 import { formatToolCall, formatToolResult } from './ui.ts'
 
-const DEFAULT_SYSTEM =
-  'You are a helpful coding assistant with file-system tools (read_file, ' +
-  'list_files, write_file, delete_file). Use them to explore and modify files when asked. ' +
-  'Use absolute paths. Keep responses brief and direct.'
+const DEFAULT_SYSTEM = [
+  // Intro
+  'You are an interactive agent that helps users with software engineering tasks.',
+  'Use the tools available to you to assist the user.',
+  '',
+  // Doing tasks
+  'When given a task, try the simplest approach first.',
+  'Do not add features, refactor code, or make improvements beyond what was asked.',
+  'Read existing code before suggesting modifications.',
+  'Use absolute paths for file operations.',
+  '',
+  // Executing with care
+  'Carefully consider the reversibility of actions.',
+  'For destructive or hard-to-reverse operations, confirm with the user first.',
+  '',
+  // Tone and style
+  'Keep responses brief and direct. Lead with the answer, not the reasoning.',
+  'Skip filler words, preamble, and unnecessary transitions.',
+  'Do not restate what the user said — just do it.',
+  'Only use emojis if the user explicitly requests it.',
+].join('\n')
 
 const TOOLS = [readFileTool, listFilesTool, writeFileTool, deleteFileTool]
+
+const SERVER_TOOLS: ServerTool[] = [
+  { type: 'web_search_20250305', name: 'web_search', max_uses: 5 },
+]
 
 async function main() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -36,7 +57,6 @@ async function main() {
 
   console.log(bold('mini-claude REPL'))
   console.log(dim(`model: ${model}`))
-  console.log(dim(`tools: ${TOOLS.map(t => t.name).join(', ')}`))
   console.log(dim('type /help for commands, /exit to quit'))
   console.log()
 
@@ -108,6 +128,7 @@ async function main() {
         userInput: input,
         history,
         tools: TOOLS,
+        serverTools: SERVER_TOOLS,
         system: DEFAULT_SYSTEM,
         model,
         canUseTool: permissions.canUseTool,
@@ -123,6 +144,12 @@ async function main() {
             break
           case 'tool_result':
             process.stdout.write(formatToolResult(ev.result, ev.isError) + '\n\n')
+            break
+          case 'server_tool_call':
+            process.stdout.write('\n\n' + formatToolCall(ev.name, ev.input) + '\n')
+            break
+          case 'server_tool_result':
+            process.stdout.write(dim('  ← (server-side result)') + '\n\n')
             break
           case 'turn_end':
             console.log(

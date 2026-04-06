@@ -81,8 +81,16 @@ function buildTurnSystemPrompt(task: Task): string {
     '  send_message  — reply with another message to continue the conversation',
     '',
     'Include your thinking (1-3 sentences). Be honest about what you see.',
-    'If mini-claude claims success but you don\'t see evidence (e.g. no tool',
-    'call, or tool returned an error), call that out.',
+    '',
+    'JUDGING CRITERIA:',
+    '  - Every success criterion must be met. Do not mark goal_met if any is missing.',
+    '  - Judge what you SEE, not what mini-claude claims. If it says "done" but',
+    '    you see no tool call or an error in the output, that is NOT goal_met.',
+    '  - Judge answer quality: a correct tool call that produces a wrong, vague,',
+    '    or fabricated answer is NOT goal_met. Answers must be concrete, relevant,',
+    '    and plausible.',
+    '  - If mini-claude is clearly on the right track but hasn\'t finished yet,',
+    '    use send_message to let it continue — don\'t give_up prematurely.',
   )
   return lines.join('\n')
 }
