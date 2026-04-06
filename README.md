@@ -1,18 +1,18 @@
 # mini-claude
 
-**Build your own Claude Code from scratch in ~1,500 lines of TypeScript.**
+**A minimal Claude Code, built from scratch to learn how AI coding agents work.**
 
-A fully functional AI coding agent with tool calling, streaming, permissions,
-web search, and a black-box evaluation harness — built to understand how tools
-like [Claude Code](https://github.com/anthropics/claude-code) actually work
-under the hood.
+[Claude Code](https://github.com/anthropics/claude-code) is 500K+ lines of
+production TypeScript. This project strips it down to the essential architecture
+— tool calling, streaming, permissions, web search, and a black-box eval
+harness — in the simplest code possible.
 
 No SDK. No hidden system prompts. Just `fetch`, async generators, and a
 tool-calling loop.
 
 ## Why this exists
 
-Claude Code is ~50K lines of production code. This project distills the core
+Claude Code is 500K+ lines of production code. This project distills the core
 architecture into something you can read in an afternoon:
 
 - **Direct API client** — raw `fetch` to `/v1/messages` with SSE streaming
@@ -134,7 +134,7 @@ stateless — you send the entire conversation every time.
 | `debug.ts` | ~135 | `makeLogger(subsystem)`, silent by default, `DEBUG=1` to enable |
 | `ui.ts` | ~125 | ANSI helpers, `formatToolCall`, `formatToolResult` |
 
-**~1,500 lines total** for the core agent. Zero runtime dependencies beyond Bun.
+Zero runtime dependencies beyond Bun.
 
 ## Evaluation
 
