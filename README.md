@@ -30,11 +30,23 @@ Every file has comments pointing to the equivalent Claude Code source for compar
 
 ## Quick start
 
+**Option A: API key (recommended, works everywhere)**
+
 ```sh
-# prerequisites: macOS, Bun >= 1.3, logged into `claude` CLI
+export ANTHROPIC_API_KEY=sk-ant-...
 bun install
 bun run repl.ts
+```
 
+**Option B: OAuth (Claude Max/Pro on macOS)**
+
+```sh
+# requires: macOS, `claude` CLI logged in
+bun install
+bun run repl.ts
+```
+
+```sh
 # with debug logs
 DEBUG=1 bun run repl.ts
 ```
@@ -247,22 +259,22 @@ trajectories, evaluator thinking at each decision point, and outcomes.
 - Context compaction (conversation summarization)
 - Session persistence
 
-## Why direct OAuth instead of the Agent SDK?
+## Authentication
 
-The official [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
-spawns a Claude Code subprocess — which injects a ~10K token system prompt
-and inherits account-level MCP tools. Direct OAuth gives raw API access
-for learning.
+mini-claude supports two auth modes:
 
-Caveat: Anthropic's server-side classifier currently restricts non-Claude-Code
-OAuth traffic — **only Haiku works** via this path. Sonnet/Opus return 429.
-For production use, use an API key with `x-api-key` auth instead.
+| Mode | How | Models | Platform |
+|---|---|---|---|
+| **API key** | `export ANTHROPIC_API_KEY=sk-ant-...` | All models | Any |
+| **OAuth** | `claude` CLI logged in | Haiku only* | macOS |
+
+\* Anthropic's server-side classifier restricts non-Claude-Code OAuth traffic.
+Sonnet/Opus return 429 via OAuth. Use an API key for full model access.
 
 ## Prerequisites
 
-- macOS (Keychain credential storage)
 - [Bun](https://bun.sh) >= 1.3
-- `claude` CLI logged in (Claude Max / Pro subscription)
+- One of: `ANTHROPIC_API_KEY` env var, or `claude` CLI logged in (macOS)
 
 ## License
 

@@ -1,12 +1,13 @@
 {
   "name": "mini-claude",
-  "module": "index.ts",
+  "description": "A minimal Claude Code built from scratch — agent loop, tool calling, web search, permissions, and a black-box LLM eval harness",
+  "license": "MIT",
+  "module": "repl.ts",
+  "type": "module",
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
-  },
-  "private": true,
-  "type": "module"
+  }
 }

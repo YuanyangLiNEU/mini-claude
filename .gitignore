@@ -30,6 +30,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # IntelliJ based IDEs
 .idea
 
+# Editor/AI configs
+.cursor/
+CLAUDE.md
+
 # Finder (MacOS) folder config
 .DS_Store
 

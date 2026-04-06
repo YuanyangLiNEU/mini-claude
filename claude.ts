@@ -7,7 +7,7 @@
  * Reference: claude-code src/services/api/claude.ts (their much more elaborate version).
  */
 
-import { getAccessToken, OAUTH_BETA_HEADER } from './auth.ts'
+import { getAuthHeaders } from './auth.ts'
 import { isDebugEnabled, makeLogger } from './debug.ts'
 
 const log = makeLogger('api')
@@ -117,12 +117,10 @@ function buildRequestBody(opts: CompleteOpts, stream: boolean): object {
 }
 
 async function buildHeaders(): Promise<Record<string, string>> {
-  const token = await getAccessToken()
   return {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`,
     'anthropic-version': ANTHROPIC_VERSION,
-    'anthropic-beta': OAUTH_BETA_HEADER,
+    ...(await getAuthHeaders()),
   }
 }
 
