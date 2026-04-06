@@ -284,18 +284,15 @@ const INDEX_HTML = `<!DOCTYPE html>
 
     const totalTasks = taskResults.length;
     const goalsMet = taskResults.filter(t => t.outcome === 'goal_met').length;
-    const totalTurns = taskResults.reduce((s, t) => s + (t.metrics?.conversationTurns || 0), 0);
-    const totalIn = taskResults.reduce((s, t) => s + (t.metrics?.miniClaudeInputTokens || 0), 0);
-    const totalOut = taskResults.reduce((s, t) => s + (t.metrics?.miniClaudeOutputTokens || 0), 0);
-    const totalMs = taskResults.reduce((s, t) => s + (t.metrics?.wallMs || 0), 0);
+    const totalTurns = taskResults.reduce((s, t) => s + (t.turns?.length || 0), 0);
+    const totalMs = taskResults.reduce((s, t) => s + (t.wallMs || 0), 0);
 
     let html = '';
 
     if (runStart) {
       html += '<div class="meta-bar">';
       html += '<div class="meta-chip"><strong>' + esc(runStart.timestamp?.slice(0,19).replace('T',' ') ?? '') + '</strong></div>';
-      html += '<div class="meta-chip">mini-claude: <strong>' + esc(runStart.model) + '</strong></div>';
-      html += '<div class="meta-chip">evaluator: <strong>' + esc(runStart.evaluatorModel || runStart.judgeModel) + '</strong></div>';
+      html += '<div class="meta-chip">evaluator: <strong>' + esc(runStart.evaluatorModel || '') + '</strong></div>';
       html += '<div class="meta-chip"><strong>' + totalTasks + '</strong> task' + (totalTasks === 1 ? '' : 's') + '</div>';
       html += '</div>';
     }
@@ -303,9 +300,8 @@ const INDEX_HTML = `<!DOCTYPE html>
     const passColor = goalsMet === totalTasks ? 'var(--green)' : 'var(--amber)';
     html += '<div class="score-grid">';
     html += '<div class="score-card"><div class="score-label">Goals met</div><div class="score-value" style="color:' + passColor + '">' + goalsMet + '/' + totalTasks + '</div><div class="score-sub">tasks successful</div></div>';
-    html += '<div class="score-card"><div class="score-label">Conversation</div><div class="score-value">' + totalTurns + '</div><div class="score-sub">turns total</div></div>';
-    html += '<div class="score-card"><div class="score-label">Tokens</div><div class="score-value" style="font-size:22px;">' + (totalIn/1000).toFixed(1) + 'k<span style="font-size:14px; color:var(--muted);"> in</span></div><div class="score-sub">' + totalOut + ' output (mini-claude only)</div></div>';
-    html += '<div class="score-card"><div class="score-label">Wall time</div><div class="score-value">' + (totalMs/1000).toFixed(1) + '<span style="font-size:14px; color:var(--muted);">s</span></div><div class="score-sub">conversation + evaluator</div></div>';
+    html += '<div class="score-card"><div class="score-label">Turns</div><div class="score-value">' + totalTurns + '</div><div class="score-sub">total conversation turns</div></div>';
+    html += '<div class="score-card"><div class="score-label">Wall time</div><div class="score-value">' + (totalMs/1000).toFixed(1) + '<span style="font-size:14px; color:var(--muted);">s</span></div><div class="score-sub">including evaluator calls</div></div>';
     html += '</div>';
 
     html += '<section><h2 class="section">Tasks</h2>';
@@ -318,49 +314,74 @@ const INDEX_HTML = `<!DOCTYPE html>
   function renderTaskCard(t) {
     const outcomeClass = t.outcome === 'goal_met' ? 'pass' : 'fail';
     const outcomeLabel = (t.outcome || 'unknown').replace(/_/g, ' ');
+    const permCount = (t.turns || []).filter(tt => tt.permissionDecision).length;
+    const turnCount = (t.turns || []).length;
 
-    let html = '<div class="task-card">';
-    html += '<div class="task-header">';
-    html += '<div class="task-name">' + esc(t.task) + '</div>';
-    html += '<div class="verdict-badge ' + outcomeClass + '">' + esc(outcomeLabel) + '</div>';
+    let html = '<div class="task-card" style="padding:24px;">';
+
+    // Header
+    html += '<div style="display:flex; align-items:flex-start; gap:12px; margin-bottom:20px;">';
+    html += '<div style="flex:1;">';
+    html += '<div style="font-size:13px; color:var(--muted); margin-bottom:4px;">' + turnCount + ' turn' + (turnCount === 1 ? '' : 's');
+    if (permCount > 0) html += ' · ' + permCount + ' permission prompt' + (permCount === 1 ? '' : 's');
+    html += ' · ' + ((t.wallMs ?? 0)/1000).toFixed(1) + 's</div>';
+    html += '<div style="font-size:18px; font-weight:700; line-height:1.4;">' + esc(t.goal) + '</div>';
+    html += '</div>';
+    html += '<div class="verdict-badge ' + outcomeClass + '" style="font-size:13px; padding:5px 14px; flex-shrink:0;">' + esc(outcomeLabel) + '</div>';
     html += '</div>';
 
-    const permCount = (t.turns || []).filter(tt => tt.permissionEvent).length;
-    html += '<div class="task-meta">';
-    html += '<span><strong>' + (t.metrics?.conversationTurns ?? '?') + '</strong> turns</span>';
-    if (permCount > 0) {
-      html += '<span><strong>' + permCount + '</strong> permission prompt' + (permCount === 1 ? '' : 's') + '</span>';
+    // Details table
+    html += '<table style="width:100%; margin-bottom:20px; border-collapse:collapse;">';
+    html += '<tr><td style="font-size:14px; color:var(--muted); padding:6px 16px 6px 0; vertical-align:top; white-space:nowrap; width:90px;">Task</td>';
+    html += '<td style="font-size:14px; padding:6px 0;"><code style="font-size:13px; background:var(--bg); padding:2px 8px; border-radius:4px;">' + esc(t.task) + '</code></td></tr>';
+    if (t.openingMessage) {
+      html += '<tr><td style="font-size:14px; color:var(--muted); padding:6px 16px 6px 0; vertical-align:top;">Message</td>';
+      html += '<td style="font-size:14px; padding:6px 0;">"' + esc(t.openingMessage) + '"</td></tr>';
     }
-    html += '<span><strong>' + (t.metrics?.miniClaudeInputTokens ?? 0) + '</strong> in</span>';
-    html += '<span><strong>' + (t.metrics?.miniClaudeOutputTokens ?? 0) + '</strong> out</span>';
-    html += '<span><strong>' + ((t.metrics?.wallMs ?? 0)/1000).toFixed(1) + 's</strong></span>';
-    html += '</div>';
-
-    html += '<div class="task-goal">' + esc(t.goal) + '</div>';
-
-    // Setup + persona (environment the evaluator operates in)
     if (t.setupDescription) {
-      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px; padding:6px 10px; background:var(--bg); border-radius:6px;"><strong>setup:</strong> ' + esc(t.setupDescription) + '</div>';
+      html += '<tr><td style="font-size:14px; color:var(--muted); padding:6px 16px 6px 0; vertical-align:top;">Setup</td>';
+      html += '<td style="font-size:14px; padding:6px 0;">' + esc(t.setupDescription) + '</td></tr>';
     }
     if (t.persona) {
-      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px; padding:6px 10px; background:var(--bg); border-radius:6px;"><strong>persona:</strong> ' + esc(t.persona) + '</div>';
+      html += '<tr><td style="font-size:14px; color:var(--muted); padding:6px 16px 6px 0; vertical-align:top;">Persona</td>';
+      html += '<td style="font-size:14px; padding:6px 0;">' + esc(t.persona) + '</td></tr>';
     }
+    html += '</table>';
 
     // Success criteria
     if (t.successCriteria?.length) {
-      html += '<div class="expectations"><ul class="exp-list">';
+      html += '<div style="margin-bottom:20px;">';
+      html += '<div style="font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">Success criteria</div>';
       for (const c of t.successCriteria) {
-        html += '<li><span class="exp-mark" style="color:var(--muted);">·</span><span>' + esc(c) + '</span></li>';
+        html += '<div style="font-size:14px; line-height:1.6; padding-left:16px; position:relative;">';
+        html += '<span style="position:absolute; left:0; color:var(--muted);">·</span>' + esc(c);
+        html += '</div>';
       }
-      html += '</ul></div>';
+      html += '</div>';
     }
 
-    if (t.finalSummary) html += '<div class="reasoning">' + esc(t.finalSummary) + '</div>';
-    if (t.giveUpReason) html += '<div class="reasoning" style="border-left-color:var(--amber);">Gave up: ' + esc(t.giveUpReason) + '</div>';
-    if (t.errorMessage) html += '<div class="reasoning" style="border-left-color:var(--red);">Error: ' + esc(t.errorMessage) + '</div>';
+    // Evaluator verdict
+    if (t.finalSummary) {
+      html += '<div style="font-size:14px; line-height:1.6; padding:14px 16px; background:var(--green-bg); border:1px solid var(--green-border); border-radius:10px; margin-bottom:16px; color:var(--green-text);">';
+      html += '<div style="font-size:13px; font-weight:700; margin-bottom:4px;">EVALUATOR VERDICT</div>';
+      html += esc(t.finalSummary);
+      html += '</div>';
+    }
+    if (t.giveUpReason) {
+      html += '<div style="font-size:14px; line-height:1.6; padding:14px 16px; background:var(--amber-bg); border:1px solid var(--amber); border-radius:10px; margin-bottom:16px; color:var(--amber-text);">';
+      html += '<div style="font-size:13px; font-weight:700; margin-bottom:4px;">EVALUATOR VERDICT</div>';
+      html += 'Gave up: ' + esc(t.giveUpReason);
+      html += '</div>';
+    }
+    if (t.errorMessage) {
+      html += '<div style="font-size:14px; line-height:1.6; padding:14px 16px; background:var(--red-bg); border:1px solid var(--red-border); border-radius:10px; margin-bottom:16px; color:var(--red-text);">';
+      html += '<div style="font-size:13px; font-weight:700; margin-bottom:4px;">ERROR</div>';
+      html += esc(t.errorMessage);
+      html += '</div>';
+    }
 
-    // Conversation turns
-    html += '<details><summary>Conversation (' + (t.turns?.length || 0) + ' turns)</summary>';
+    // Conversation turns (collapsible)
+    html += '<details><summary style="font-size:13px;">Conversation (' + turnCount + ' turn' + (turnCount === 1 ? '' : 's') + ')</summary>';
     html += renderConversation(t);
     html += '</details>';
 
@@ -369,80 +390,70 @@ const INDEX_HTML = `<!DOCTYPE html>
   }
 
   function renderConversation(t) {
-    if (!t.turns?.length) return '<div class="tool-call-row" style="color:var(--muted); font-style:italic;">no turns</div>';
+    const turns = t.turns || [];
+    if (!turns.length) {
+      return '<div style="color:var(--muted); font-style:italic; padding:12px;">no turns recorded</div>';
+    }
+
     let html = '';
-    let userMsg = t.openingMessage;
-    for (const turn of t.turns) {
-      html += '<div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">';
-      html += '<div style="font-size:11px; color:var(--muted); margin-bottom:8px;">TURN ' + turn.turnNum + '</div>';
+    let userMsg = t.openingMessage || '';
 
-      html += '<div style="margin-bottom:8px; padding:8px 10px; background:var(--sky-light); border-radius:8px; font-size:12px;">';
-      html += '<strong style="color:var(--sky-text);">👤 user:</strong> ' + esc(userMsg);
-      html += '</div>';
+    for (const turn of turns) {
+      html += '<div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">';
 
-      // Render mini-claude actions in order. When we hit the tool_call that
-      // triggered a permission event (matched by tool name + input), insert
-      // the permission prompt/decision inline — that's where it chronologically
-      // happens (the agent loop pauses there before tool_result arrives).
-      const perm = turn.permissionEvent;
-      const permInputStr = perm ? JSON.stringify(perm.toolInput) : '';
-      let permInserted = false;
+      // Turn label
+      html += '<div style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px;">Turn ' + turn.turnNum + '</div>';
 
-      for (const a of turn.miniClaudeActions || []) {
-        if (a.type === 'text') {
-          html += '<div style="padding:4px 10px; font-size:12px; line-height:1.5;">' + esc(a.text.replace(/\\n/g, ' ')) + '</div>';
-        } else if (a.type === 'tool_call') {
-          html += '<div class="tool-call-row"><span class="tool-call-name">→ ' + esc(a.name) + '</span>(' + esc(JSON.stringify(a.input).slice(0,200)) + ')</div>';
-          // If this tool_call triggered the permission prompt, render it right after
-          if (perm && !permInserted && a.name === perm.toolName && JSON.stringify(a.input) === permInputStr) {
-            html += renderPermissionBlock(perm);
-            permInserted = true;
-          }
-        } else if (a.type === 'tool_result') {
-          const color = a.isError ? 'var(--red-text)' : 'var(--muted)';
-          html += '<div class="tool-call-row" style="color:' + color + '; font-size:11px;">← ' + esc(a.result.replace(/\\n/g,' ').slice(0,200)) + '</div>';
-        }
+      // User message (sky bubble)
+      if (userMsg) {
+        html += '<div style="margin-bottom:12px; padding:10px 14px; background:var(--sky-light); border-radius:10px; font-size:14px; line-height:1.5;">';
+        html += '<span style="font-weight:600; color:var(--sky-text);">👤 User</span>';
+        html += '<div style="margin-top:4px;">' + esc(userMsg) + '</div>';
+        html += '</div>';
       }
-      // Fallback: if we didn't match the tool call (shouldn't happen), render
-      // the permission at the end so it's still visible.
-      if (perm && !permInserted) html += renderPermissionBlock(perm);
+
+      // mini-claude response (raw terminal output)
+      if (turn.rawOutput) {
+        html += '<div style="margin-bottom:12px; padding:10px 14px; background:var(--surface); border:1px solid var(--border); border-radius:10px; font-size:14px; line-height:1.5;">';
+        html += '<span style="font-weight:600; color:var(--text);">🤖 mini-claude</span>';
+        html += '<pre style="margin-top:6px; white-space:pre-wrap; word-break:break-word; font-size:13px; line-height:1.6; color:var(--text);">' + esc(turn.rawOutput.trim()) + '</pre>';
+        html += '</div>';
+      }
+
+      // Permission decision (if any)
+      if (turn.permissionDecision) {
+        const pd = turn.permissionDecision;
+        const approved = pd.action === 'approve';
+        const accent = approved ? 'var(--green)' : 'var(--red)';
+        const bg = approved ? 'var(--green-bg)' : 'var(--red-bg)';
+        const border = approved ? 'var(--green-border)' : 'var(--red-border)';
+        const mark = approved ? '✓ APPROVED' : '✗ DENIED';
+        html += '<div style="margin-bottom:12px; padding:10px 14px; background:' + bg + '; border:1px solid ' + border + '; border-left:4px solid ' + accent + '; border-radius:10px; font-size:14px;">';
+        html += '<div style="font-weight:700; color:' + accent + '; font-size:12px; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">⚠ Permission ' + mark + '</div>';
+        html += '<div style="color:var(--muted); line-height:1.5;">💭 ' + esc(pd.thinking) + '</div>';
+        if (pd.why) html += '<div style="margin-top:4px;">' + esc(pd.why) + '</div>';
+        html += '</div>';
+      }
 
       // Evaluator decision
-      const d = turn.evaluatorDecision;
-      if (d) {
-        html += '<div style="margin-top:8px; padding:8px 10px; background:var(--bg); border-radius:8px; font-size:12px; border-left:3px solid var(--sky);">';
-        html += '<div style="font-style:italic; color:var(--muted);">💭 ' + esc(d.thinking) + '</div>';
+      if (turn.evaluatorDecision) {
+        const d = turn.evaluatorDecision;
+        html += '<div style="margin-bottom:8px; padding:10px 14px; background:var(--bg); border-radius:10px; border-left:3px solid var(--sky); font-size:14px; line-height:1.5;">';
+        html += '<div style="font-weight:700; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">💭 Evaluator</div>';
+        html += '<div style="color:var(--muted);">' + esc(d.thinking) + '</div>';
         if (d.action === 'goal_met') {
-          html += '<div style="margin-top:4px; color:var(--green-text); font-weight:600;">✓ goal met — ' + esc(d.summary) + '</div>';
+          html += '<div style="margin-top:6px; color:var(--green-text); font-weight:600;">✓ Goal met' + (d.summary ? ' — ' + esc(d.summary) : '') + '</div>';
         } else if (d.action === 'give_up') {
-          html += '<div style="margin-top:4px; color:var(--amber-text); font-weight:600;">✗ give up — ' + esc(d.reason) + '</div>';
+          html += '<div style="margin-top:6px; color:var(--amber-text); font-weight:600;">✗ Gave up' + (d.reason ? ' — ' + esc(d.reason) : '') + '</div>';
         } else if (d.action === 'send_message') {
-          html += '<div style="margin-top:4px; color:var(--sky-text);">➜ reply: "' + esc(d.message) + '"</div>';
+          html += '<div style="margin-top:6px; color:var(--sky-text); font-weight:600;">➜ Reply: "' + esc(d.message || '') + '"</div>';
+          userMsg = d.message || '';
         }
         html += '</div>';
-
-        // Set up next user message for next turn
-        if (d.action === 'send_message') userMsg = d.message;
       }
 
       html += '</div>';
     }
-    return html;
-  }
-
-  function renderPermissionBlock(p) {
-    const approved = p.decision === 'approve';
-    const accent = approved ? 'var(--green)' : 'var(--red)';
-    const bg = approved ? 'var(--green-bg)' : 'var(--red-bg)';
-    const border = approved ? 'var(--green-border)' : 'var(--red-border)';
-    const mark = approved ? '✓ APPROVED' : '✗ DENIED';
-    let html = '<div style="margin:6px 0 6px 20px; padding:10px 12px; background:' + bg + '; border:1px solid ' + border + '; border-left:4px solid ' + accent + '; border-radius:8px; font-size:12px;">';
-    html += '<div style="font-weight:700; color:' + accent + '; text-transform:uppercase; letter-spacing:0.4px; font-size:10px; margin-bottom:6px;">⚠ PERMISSION PROMPT</div>';
-    html += '<div style="font-weight:600;">' + esc(p.toolName) + '(' + esc(JSON.stringify(p.toolInput).slice(0,160)) + ')</div>';
-    html += '<div style="font-style:italic; color:var(--muted); margin-top:6px;">💭 user thinking: ' + esc(p.evaluatorThinking) + '</div>';
-    html += '<div style="margin-top:6px; font-weight:700; color:' + accent + ';">' + mark + '</div>';
-    if (p.evaluatorWhy) html += '<div style="margin-top:4px; color:var(--muted);">' + esc(p.evaluatorWhy) + '</div>';
-    html += '</div>';
     return html;
   }
 

@@ -16,17 +16,17 @@
 import * as readline from 'node:readline/promises'
 import { runAgent } from './agent.ts'
 import { createInteractivePermissions } from './permissions.ts'
-import { readFileTool, listFilesTool, writeFileTool } from './tools.ts'
+import { deleteFileTool, readFileTool, listFilesTool, writeFileTool } from './tools.ts'
 import type { ApiMessage } from './claude.ts'
 import { bold, cyan, dim, gray, red } from './ui.ts'
-import { formatToolCall, formatToolResult, formatHistory } from './ui.ts'
+import { formatToolCall, formatToolResult } from './ui.ts'
 
 const DEFAULT_SYSTEM =
   'You are a helpful coding assistant with file-system tools (read_file, ' +
-  'list_files, write_file). Use them to explore and modify files when asked. ' +
+  'list_files, write_file, delete_file). Use them to explore and modify files when asked. ' +
   'Use absolute paths. Keep responses brief and direct.'
 
-const TOOLS = [readFileTool, listFilesTool, writeFileTool]
+const TOOLS = [readFileTool, listFilesTool, writeFileTool, deleteFileTool]
 
 async function main() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -113,21 +113,8 @@ async function main() {
         canUseTool: permissions.canUseTool,
       })) {
         switch (ev.type) {
-          case 'turn_start': {
-            // Show learning annotation at the start of each agent-loop iteration.
-            // "initial" = first call with the user's new message
-            // "tool_results" = follow-up call with tool results in history
-            const why = ev.reason === 'initial' ? 'user message' : 'tool results'
-            console.log(
-              gray(
-                `── turn ${ev.turnNum} · sending ${ev.historyMessages} msg${ev.historyMessages === 1 ? '' : 's'} to API (trigger: ${why}) ──`,
-              ),
-            )
-            // Dump the full history being sent (for learning)
-            console.log(formatHistory(history))
-            console.log()
+          case 'turn_start':
             break
-          }
           case 'text':
             process.stdout.write(ev.text)
             break
@@ -140,7 +127,7 @@ async function main() {
           case 'turn_end':
             console.log(
               gray(
-                `── turn ended · stop=${ev.stopReason} · in:${ev.turnUsage.inputTokens} out:${ev.turnUsage.outputTokens}${ev.turnUsage.cacheReadTokens ? ` cached:${ev.turnUsage.cacheReadTokens}` : ''} ──`,
+                `\n── turn ended · stop=${ev.stopReason} · in:${ev.turnUsage.inputTokens} out:${ev.turnUsage.outputTokens}${ev.turnUsage.cacheReadTokens ? ` cached:${ev.turnUsage.cacheReadTokens}` : ''} ──`,
               ),
             )
             break

@@ -215,3 +215,35 @@ export const writeFileTool: AnyTool = defineTool<
     return `wrote ${bytes} bytes to ${path}`
   },
 })
+
+/**
+ * delete_file — remove a file from disk.
+ *
+ * Dangerous: irreversible. Permission prompt fires before execution.
+ */
+export const deleteFileTool: AnyTool = defineTool<{ path: string }, string>({
+  name: 'delete_file',
+  description:
+    'Delete a file from disk. This is IRREVERSIBLE. Use absolute paths. ' +
+    'Returns a confirmation message. Fails if the file does not exist.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Absolute path of the file to delete.',
+      },
+    },
+    required: ['path'],
+  },
+  isDangerous: true,
+  async execute({ path }) {
+    const file = Bun.file(path)
+    if (!(await file.exists())) {
+      throw new Error(`file not found: ${path}`)
+    }
+    const { unlink } = await import('node:fs/promises')
+    await unlink(path)
+    return `deleted ${path}`
+  },
+})

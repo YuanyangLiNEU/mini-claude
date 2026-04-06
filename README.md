@@ -115,7 +115,6 @@ debug.ts      — opt-in stderr logging with levels and subsystems
 | `ui.ts` | ANSI color helpers, `→` tool-call and `←` tool-result formatters, history dump. | ~125 |
 | `debug.ts` | `makeLogger(subsystem)` — silent by default, activated via `DEBUG=1` or `--debug`. Levels: debug/info/warn/error. | ~135 |
 | `repl.ts` | Interactive terminal loop. Reads input, dispatches slash commands, calls `runAgent()`, renders its event stream. | ~165 |
-| `test.ts` | Smoke test for the API client (no agent, no tools). | ~40 |
 
 Total: ~1,450 lines for core, plus ~1,550 lines of eval harness. Zero runtime dependencies.
 

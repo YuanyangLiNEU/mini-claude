@@ -1,39 +1,38 @@
 /**
- * Simulated user (the "evaluator") — decides what to say to mini-claude
- * at each turn. Backed by an LLM via `claude -p` subprocess.
+ * Simulated user (the "evaluator") — decides what to do next based on
+ * mini-claude's raw terminal output. Backed by an LLM via `claude -p`.
  *
- * At each turn, the evaluator sees:
- *   - the user's goal and success criteria
- *   - its persona (optional)
- *   - the full conversation so far (what mini-claude did)
- *   - the latest thing mini-claude did (text + tool calls)
- *
- * It returns a structured decision: continue the conversation, approve/deny
- * a permission prompt, declare the goal met, or give up.
+ * The evaluator sees the same output a human would see in their terminal
+ * (minus ANSI colors). It doesn't import anything from mini-claude's
+ * internals — it reads stdout and makes decisions.
  */
 
 import { spawn } from 'node:child_process'
 import { makeLogger } from '../debug.ts'
-import type {
-  EvaluatorDecision,
-  MiniClaudeAction,
-  Task,
-  TurnRecord,
-} from './types.ts'
+import type { Task } from './types.ts'
 
 const log = makeLogger('evaluator')
 
-const JUDGE_MODEL = 'claude-sonnet-4-6'
+const EVAL_MODEL = 'claude-sonnet-4-6'
 
-/** Schema for the evaluator's normal decision (between turns). */
-const DECISION_SCHEMA = {
+// ── Decision types ───────────────────────────────────────────────────────────
+
+export type TurnDecision =
+  | { action: 'goal_met'; thinking: string; summary: string }
+  | { action: 'give_up'; thinking: string; reason: string }
+  | { action: 'send_message'; thinking: string; message: string }
+
+export type PermissionDecision =
+  | { action: 'approve'; thinking: string }
+  | { action: 'deny'; thinking: string; why: string }
+
+// ── Schemas ──────────────────────────────────────────────────────────────────
+
+const TURN_SCHEMA = {
   type: 'object',
   properties: {
     thinking: { type: 'string' },
-    action: {
-      type: 'string',
-      enum: ['goal_met', 'give_up', 'send_message'],
-    },
+    action: { type: 'string', enum: ['goal_met', 'give_up', 'send_message'] },
     message: { type: 'string' },
     summary: { type: 'string' },
     reason: { type: 'string' },
@@ -41,7 +40,6 @@ const DECISION_SCHEMA = {
   required: ['thinking', 'action'],
 }
 
-/** Schema for a permission decision. */
 const PERMISSION_SCHEMA = {
   type: 'object',
   properties: {
@@ -52,16 +50,24 @@ const PERMISSION_SCHEMA = {
   required: ['thinking', 'action'],
 }
 
-function buildSystemPrompt(task: Task): string {
+// ── System prompts ───────────────────────────────────────────────────────────
+
+function buildTurnSystemPrompt(task: Task): string {
   const lines = [
-    'You are simulating a user interacting with an AI coding assistant called',
-    'mini-claude. Your job is to act as a realistic user: send a request,',
-    'watch what the assistant does, react to what you see. You are NOT the',
-    'assistant — you are the human on the other side of the conversation.',
+    'You are simulating a user interacting with an AI CLI tool called',
+    'mini-claude. You see its raw terminal output — exactly what a human',
+    'sitting at their keyboard would see.',
+    '',
+    'The output may contain:',
+    '  - Lines with "→" = tool calls mini-claude is making',
+    '  - Lines with "←" = tool results that came back',
+    '  - Lines starting with "──" = status annotations (ignore these)',
+    '  - Lines starting with "[" like "[done ·" = completion markers',
+    '  - Regular text = mini-claude\'s response to you',
     '',
     `YOUR GOAL: ${task.goal}`,
     '',
-    'YOUR SUCCESS CRITERIA (what must be true for the goal to be met):',
+    'SUCCESS CRITERIA:',
     ...task.successCriteria.map((c, i) => `  ${i + 1}. ${c}`),
   ]
   if (task.persona) {
@@ -69,170 +75,102 @@ function buildSystemPrompt(task: Task): string {
   }
   lines.push(
     '',
-    'At each turn you will see:',
-    "- what mini-claude just did (its text response + any tools it called)",
-    '- the full conversation history',
-    '',
-    'You must decide ONE of:',
-    '  goal_met      — criteria all satisfied; end the conversation successfully',
-    '  give_up       — the assistant failed in a way I cannot recover from',
+    'Decide ONE of:',
+    '  goal_met      — all criteria satisfied; include a summary',
+    '  give_up       — mini-claude failed in a way you cannot recover from',
     '  send_message  — reply with another message to continue the conversation',
     '',
-    'Include your thinking (1-3 sentences explaining what you notice and what',
-    'you decided). Be honest about what you observe. If mini-claude claims it',
-    'did something without actually calling the needed tool, call that out in',
-    'your thinking and decide accordingly.',
+    'Include your thinking (1-3 sentences). Be honest about what you see.',
+    'If mini-claude claims success but you don\'t see evidence (e.g. no tool',
+    'call, or tool returned an error), call that out.',
   )
   return lines.join('\n')
 }
 
-/**
- * Build the per-turn prompt that describes the conversation so far and the
- * latest turn the evaluator needs to react to.
- */
-function buildTurnPrompt(
-  task: Task,
-  history: TurnRecord[],
-  latestActions: MiniClaudeAction[],
-): string {
-  const lines: string[] = []
-  lines.push(`Your original request: "${task.openingMessage}"`)
-  lines.push('')
-
-  if (history.length > 0) {
-    lines.push('Conversation so far:')
-    for (const turn of history) {
-      lines.push(`  [turn ${turn.turnNum}] mini-claude:`)
-      for (const a of turn.miniClaudeActions) {
-        lines.push(`    ${formatAction(a)}`)
-      }
-      if (turn.evaluatorDecision.action === 'send_message') {
-        lines.push(`  [turn ${turn.turnNum}] you replied: "${turn.evaluatorDecision.message}"`)
-      }
-    }
-    lines.push('')
-  }
-
-  lines.push('mini-claude just did (this is the turn you need to react to):')
-  for (const a of latestActions) {
-    lines.push(`  ${formatAction(a)}`)
-  }
-  lines.push('')
-  lines.push(
-    'Decide your next action. If your goal is met, say so. If you need to',
-    'send another message, write it as if you are typing it in a chat UI.',
-    'Respond as JSON.',
-  )
-  return lines.join('\n')
+function buildPermissionSystemPrompt(task: Task): string {
+  return buildTurnSystemPrompt(task) +
+    '\n\n' +
+    'RIGHT NOW: mini-claude is asking YOU for permission to run a dangerous ' +
+    'tool. You can see the permission prompt in the output. Decide: approve ' +
+    'or deny. Base your decision on your goal and persona.'
 }
 
-function formatAction(a: MiniClaudeAction): string {
-  if (a.type === 'text') {
-    return `text: "${truncate(a.text.replace(/\n/g, ' '), 200)}"`
-  }
-  if (a.type === 'tool_call') {
-    return `tool_call: ${a.name}(${truncate(JSON.stringify(a.input), 120)})`
-  }
-  // tool_result
-  const tag = a.isError ? 'tool_error' : 'tool_result'
-  return `${tag} [${a.name}]: ${truncate(a.result.replace(/\n/g, ' '), 200)}`
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + '…' : s
-}
+// ── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Ask the evaluator what to do next given mini-claude's latest actions.
+ * Given the raw terminal output from mini-claude, decide what to do next.
  */
 export async function decideNextStep(
   task: Task,
-  history: TurnRecord[],
-  latestActions: MiniClaudeAction[],
-): Promise<EvaluatorDecision> {
-  const system = buildSystemPrompt(task)
-  const prompt = buildTurnPrompt(task, history, latestActions)
-  log.debug('decide next step', { task: task.name, historyLen: history.length })
+  conversationSoFar: string,
+  latestOutput: string,
+): Promise<TurnDecision> {
+  const prompt = [
+    conversationSoFar
+      ? `Conversation so far:\n\`\`\`\n${truncate(conversationSoFar, 3000)}\n\`\`\``
+      : '(This is the first turn.)',
+    '',
+    `Your original request: "${task.openingMessage}"`,
+    '',
+    'mini-claude just printed:',
+    '```',
+    latestOutput.trim(),
+    '```',
+    '',
+    'Decide your next action. Respond as JSON.',
+  ].join('\n')
 
-  const raw = await spawnClaude(system, prompt, DECISION_SCHEMA)
+  log.debug('decideNextStep', { task: task.name, outputLen: latestOutput.length })
+  const raw = await spawnClaude(buildTurnSystemPrompt(task), prompt, TURN_SCHEMA)
   const parsed = parseEnvelope(raw)
 
-  // Coerce into our union — the schema allows varying shapes
   if (parsed.action === 'goal_met') {
-    return {
-      action: 'goal_met',
-      thinking: parsed.thinking || '',
-      summary: parsed.summary || 'goal met',
-    }
+    return { action: 'goal_met', thinking: parsed.thinking || '', summary: parsed.summary || 'goal met' }
   }
   if (parsed.action === 'give_up') {
-    return {
-      action: 'give_up',
-      thinking: parsed.thinking || '',
-      reason: parsed.reason || parsed.message || 'gave up',
-    }
+    return { action: 'give_up', thinking: parsed.thinking || '', reason: parsed.reason || 'gave up' }
   }
-  return {
-    action: 'send_message',
-    thinking: parsed.thinking || '',
-    message: parsed.message || '',
-  }
+  return { action: 'send_message', thinking: parsed.thinking || '', message: parsed.message || '' }
 }
 
 /**
- * Ask the evaluator to approve or deny a permission request.
+ * Given raw terminal output showing a permission prompt, decide approve/deny.
  */
 export async function decidePermission(
   task: Task,
-  history: TurnRecord[],
-  toolName: string,
-  toolInput: unknown,
-): Promise<EvaluatorDecision & { action: 'approve_permission' | 'deny_permission' }> {
-  const system =
-    buildSystemPrompt(task) +
-    '\n\n' +
-    'mini-claude is about to perform a dangerous operation and is asking YOU ' +
-    'for permission. Decide: approve (it should proceed) or deny (it should ' +
-    'not). Base your decision on your goal, your persona, and whether the ' +
-    'proposed action matches what you actually want done.'
-
-  const promptLines: string[] = [
+  conversationSoFar: string,
+  permissionOutput: string,
+): Promise<PermissionDecision> {
+  const prompt = [
+    conversationSoFar
+      ? `Conversation so far:\n\`\`\`\n${truncate(conversationSoFar, 3000)}\n\`\`\``
+      : '',
+    '',
     `Your original request: "${task.openingMessage}"`,
     '',
-  ]
-  if (history.length > 0) {
-    promptLines.push('Conversation so far:')
-    for (const turn of history) {
-      promptLines.push(`  [turn ${turn.turnNum}] mini-claude:`)
-      for (const a of turn.miniClaudeActions) {
-        promptLines.push(`    ${formatAction(a)}`)
-      }
-    }
-    promptLines.push('')
-  }
-  promptLines.push(
-    `mini-claude is asking permission to call:`,
-    `  ${toolName}(${JSON.stringify(toolInput)})`,
+    'mini-claude just printed this permission prompt:',
+    '```',
+    permissionOutput.trim(),
+    '```',
     '',
-    `Do you approve? Respond as JSON.`,
-  )
-  const prompt = promptLines.join('\n')
+    'Do you approve or deny? Respond as JSON.',
+  ].join('\n')
 
-  log.debug('decide permission', { task: task.name, tool: toolName })
-  const raw = await spawnClaude(system, prompt, PERMISSION_SCHEMA)
+  log.debug('decidePermission', { task: task.name })
+  const raw = await spawnClaude(buildPermissionSystemPrompt(task), prompt, PERMISSION_SCHEMA)
   const parsed = parseEnvelope(raw)
 
   if (parsed.action === 'approve') {
-    return { action: 'approve_permission', thinking: parsed.thinking || '' }
+    return { action: 'approve', thinking: parsed.thinking || '' }
   }
-  return {
-    action: 'deny_permission',
-    thinking: parsed.thinking || '',
-    why: parsed.why || 'denied',
-  }
+  return { action: 'deny', thinking: parsed.thinking || '', why: parsed.why || 'denied' }
 }
 
-// ── Subprocess helpers ───────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + '\n... (truncated)' : s
+}
 
 function parseEnvelope(raw: string): Record<string, string> {
   try {
@@ -243,33 +181,22 @@ function parseEnvelope(raw: string): Record<string, string> {
     if (envelope.structured_output) return envelope.structured_output
     if (envelope.result) return JSON.parse(envelope.result) as Record<string, string>
   } catch (err) {
-    throw new Error(
-      `failed to parse evaluator response: ${err instanceof Error ? err.message : err}`,
-    )
+    throw new Error(`failed to parse evaluator response: ${err instanceof Error ? err.message : err}`)
   }
   throw new Error('no structured_output or result in evaluator response')
 }
 
-function spawnClaude(
-  systemPrompt: string,
-  userPrompt: string,
-  schema: object,
-): Promise<string> {
+function spawnClaude(systemPrompt: string, userPrompt: string, schema: object): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       'claude',
       [
         '-p',
-        '--model',
-        JUDGE_MODEL,
-        '--disallowedTools',
-        '*',
-        '--system-prompt',
-        systemPrompt,
-        '--output-format',
-        'json',
-        '--json-schema',
-        JSON.stringify(schema),
+        '--model', EVAL_MODEL,
+        '--disallowedTools', '*',
+        '--system-prompt', systemPrompt,
+        '--output-format', 'json',
+        '--json-schema', JSON.stringify(schema),
         userPrompt,
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] },
