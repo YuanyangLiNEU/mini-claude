@@ -32,6 +32,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Editor/AI configs
 .cursor/
+.vscode/
+*.code-workspace
 CLAUDE.md
 
 # Finder (MacOS) folder config
