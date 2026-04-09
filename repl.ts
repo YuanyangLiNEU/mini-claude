@@ -16,7 +16,8 @@
 import * as readline from 'node:readline/promises'
 import { runAgent } from './agent.ts'
 import { createInteractivePermissions } from './permissions.ts'
-import { deleteFileTool, readFileTool, listFilesTool, writeFileTool } from './tools.ts'
+import { deleteFileTool, readFileTool, listFilesTool, writeFileTool, type AnyTool } from './tools.ts'
+import { loadMcpTools, shutdownMcpServers } from './mcp/tools.ts'
 import type { ApiMessage, ServerTool } from './claude.ts'
 import { bold, cyan, dim, gray, red } from './ui.ts'
 import { formatToolCall, formatToolResult } from './ui.ts'
@@ -55,8 +56,15 @@ async function main() {
   const permissions = createInteractivePermissions(rl)
   let model = 'claude-haiku-4-5'
 
+  // Load MCP tools from .mcp.json (if it exists)
+  const mcpTools = await loadMcpTools()
+  const allTools: AnyTool[] = [...TOOLS, ...mcpTools]
+
   console.log(bold('mini-claude REPL'))
   console.log(dim(`model: ${model}`))
+  if (mcpTools.length > 0) {
+    console.log(dim(`mcp tools: ${mcpTools.map(t => t.name).join(', ')}`))
+  }
   console.log(dim('type /help for commands, /exit to quit'))
   console.log()
 
@@ -86,7 +94,7 @@ async function main() {
       continue
     }
     if (input === '/tools') {
-      for (const t of TOOLS) {
+      for (const t of allTools) {
         const danger = t.isDangerous ? red(' [dangerous]') : ''
         console.log(`  ${bold(t.name)}${danger} — ${t.description.split('.')[0]}`)
       }
@@ -127,7 +135,7 @@ async function main() {
       for await (const ev of runAgent({
         userInput: input,
         history,
-        tools: TOOLS,
+        tools: allTools,
         serverTools: SERVER_TOOLS,
         system: DEFAULT_SYSTEM,
         model,
@@ -175,6 +183,7 @@ async function main() {
     }
   }
 
+  shutdownMcpServers()
   rl.close()
   console.log(dim('bye.'))
 }

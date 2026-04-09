@@ -23,6 +23,7 @@ architecture into something you can read in an afternoon:
 - **Direct API client** — raw `fetch` to `/v1/messages` with SSE streaming
 - **Agent loop** — async generator that yields events as tools execute
 - **Tool calling** — Claude decides which tools to use, you execute them locally
+- **MCP (Model Context Protocol)** — connect to external tool servers (GitHub, etc.) via stdio or HTTP
 - **Server-side tools** — Anthropic's built-in web search, no parsing needed
 - **Permission system** — dangerous tools require interactive approval
 
@@ -98,17 +99,19 @@ Dangerous tools require permission:
 ## Architecture
 
 ```
-repl.ts           terminal UI: input, rendering, slash commands
+repl.ts            terminal UI: input, rendering, slash commands
    ↓
-agent.ts          agent loop: tool dispatch, history, permission gate
+agent.ts           agent loop: tool dispatch, history, permission gate
    ↓
-claude.ts         API client: fetch + SSE streaming + server tool support
+claude.ts          API client: fetch + SSE streaming + server tool support
    ↓
-auth.ts           OAuth: macOS Keychain token read + auto-refresh
-tools.ts          tool definitions: read, list, write, delete files
-permissions.ts    interactive y/n/a prompts + session allowlist
-ui.ts             ANSI colors, tool-call/result formatters
-debug.ts          opt-in stderr logging with subsystems and levels
+auth.ts            auth: API key or OAuth (macOS Keychain)
+tools.ts           built-in tool definitions: read, list, write, delete files
+mcp/client.ts      MCP client: stdio + HTTP transports (JSON-RPC 2.0)
+mcp/tools.ts       MCP tool loader: reads .mcp.json, discovers tools
+permissions.ts     interactive y/n/a prompts + session allowlist
+ui.ts              ANSI colors, tool-call/result formatters
+debug.ts           opt-in stderr logging with subsystems and levels
 ```
 
 ### The agent loop
@@ -128,27 +131,69 @@ Each iteration: call `/v1/messages` with full history + tool schemas, stream
 the response, execute any tool calls, feed results back, repeat. The API is
 stateless — you send the entire conversation every time.
 
-### Client tools vs server tools
+### Three kinds of tools
 
-| | Client tools | Server tools |
+| | Built-in tools | MCP tools | Server tools |
+|---|---|---|---|
+| **Examples** | `read_file`, `write_file` | `mcp__github__create_issue` | `web_search` |
+| **Defined in** | `tools.ts` | External MCP server | Anthropic's API |
+| **Who executes** | mini-claude | MCP server (local or remote) | Anthropic |
+| **Permission** | `isDangerous` → y/n/a | No (currently) | No |
+
+### MCP (Model Context Protocol)
+
+MCP lets mini-claude use tools from external servers — without writing any
+tool-specific code. Configure `.mcp.json`, and mini-claude discovers tools
+automatically at startup via the MCP protocol.
+
+```sh
+cp .mcp.example.json .mcp.json
+# edit .mcp.json — add your GitHub token, Slack server, etc.
+bun run repl.ts
+```
+
+Two transports supported:
+
+| Transport | Use case | Config |
 |---|---|---|
-| **Examples** | `read_file`, `write_file`, `delete_file` | `web_search` |
-| **Who executes** | mini-claude (locally) | Anthropic's API (server-side) |
-| **Round-trip** | API returns `tool_use` → you execute → send `tool_result` → loop | API executes internally → returns result in same response |
-| **Permission** | `isDangerous` tools require y/n/a approval | No permission needed |
+| **stdio** | Local adapter (npm package) | `"command": "bun", "args": [...]` |
+| **HTTP** | Remote hosted server (e.g. GitHub) | `"type": "http", "url": "https://..."` |
+
+Example `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "test": {
+      "command": "bun",
+      "args": ["run", "eval/test-mcp-server.ts"]
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer YOUR_GITHUB_TOKEN" }
+    }
+  }
+}
+```
+
+MCP tools appear alongside built-in tools — Claude doesn't know the difference.
+The naming convention is `mcp__<server>__<tool>` (e.g., `mcp__github__create_issue`).
 
 ### Files
 
-| File | Lines | What it does |
-|---|---|---|
-| `claude.ts` | ~340 | SSE stream parser, `server_tool_use`/`web_search_tool_result` handling, OAuth bearer auth |
-| `agent.ts` | ~230 | Async generator agent loop, tool dispatch, permission gate, usage tracking |
-| `tools.ts` | ~250 | `Tool<I,O>` type system with `AnyTool` erasure, 4 built-in file tools |
-| `permissions.ts` | ~115 | Interactive prompts, session allowlist, `allowAll`/`denyDangerous` policies |
-| `auth.ts` | ~100 | macOS Keychain read, token refresh via `platform.claude.com` |
-| `repl.ts` | ~175 | Terminal loop, slash commands, event rendering |
-| `debug.ts` | ~135 | `makeLogger(subsystem)`, silent by default, `DEBUG=1` to enable |
-| `ui.ts` | ~125 | ANSI helpers, `formatToolCall`, `formatToolResult` |
+| File | What it does |
+|---|---|
+| `claude.ts` | SSE stream parser, server tool handling, API key + OAuth auth |
+| `agent.ts` | Async generator agent loop, tool dispatch, permission gate |
+| `tools.ts` | `Tool<I,O>` type system with `AnyTool` erasure, 4 built-in file tools |
+| `mcp/client.ts` | MCP client: stdio + HTTP transports, JSON-RPC 2.0 protocol |
+| `mcp/tools.ts` | Reads `.mcp.json`, connects to servers, converts MCP tools to `AnyTool` |
+| `permissions.ts` | Interactive y/n/a prompts, session allowlist |
+| `auth.ts` | API key or macOS Keychain OAuth with auto-refresh |
+| `repl.ts` | Terminal loop, slash commands, event rendering, MCP tool loading |
+| `debug.ts` | `makeLogger(subsystem)`, silent by default, `DEBUG=1` to enable |
+| `ui.ts` | ANSI helpers, `formatToolCall`, `formatToolResult` |
 
 Zero runtime dependencies beyond Bun.
 
@@ -180,27 +225,23 @@ JSON decisions about whether success criteria are met.
 
 ### What it tests
 
-**13 tasks** across two categories:
+**23 tasks** across four categories:
 
-**File tools** (7 tasks)
-- Read, list, write, delete files
-- Multi-step chains (read → transform → write)
-- Error recovery (missing files)
-- Permission handling (approve and deny flows)
+**File tools** (7 tasks) — read, list, write, delete, multi-step chains, error recovery, permission handling
 
-**Web search** (6 tasks)
-- Basic factual queries requiring current information
-- Synthesis and comparison from search results
-- Search → file tool chains (research and save)
-- Multi-turn follow-up conversations
-- Answer formatting requirements
-- General knowledge (search not needed)
+**Web search** (6 tasks) — factual queries, synthesis, search+write chains, follow-ups, formatting, knowledge-only
+
+**MCP test server** (5 tasks) — tool discovery, echo, add, MCP+file chains, unknown tool recovery
+
+**GitHub MCP** (5 tasks) — repo info, list issues, read file, create issue, commits+save chain
 
 ### Run it
 
 ```sh
-bun run eval/runner.ts                          # all 13 tasks
+bun run eval/runner.ts                          # all 23 tasks
 bun run eval/runner.ts '--only=web_search*'     # web search tasks only
+bun run eval/runner.ts '--only=mcp*'            # MCP test tasks
+bun run eval/runner.ts '--only=github*'         # GitHub integration tasks
 bun run eval/runner.ts --only=write_file_approved  # single task
 bun run eval/runner.ts --list                   # list all tasks
 ```
@@ -255,9 +296,10 @@ trajectories, evaluator thinking at each decision point, and outcomes.
 - `bash` tool (shell command execution)
 - `grep`/`glob` tools (code search)
 - `edit_file` (diff-based editing)
-- Concurrent tool execution
 - Context compaction (conversation summarization)
+- Concurrent tool execution
 - Session persistence
+- MCP tool permission controls
 
 ## Authentication
 

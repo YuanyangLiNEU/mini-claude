@@ -36,6 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.code-workspace
 CLAUDE.md
 
+# MCP config (contains API tokens)
+.mcp.json
+
 # Finder (MacOS) folder config
 .DS_Store
 

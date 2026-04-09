@@ -271,4 +271,164 @@ export const TASKS: Task[] = [
     openingMessage: 'Search the web and give me 3 bullet points about the latest TypeScript release. Include version number and key features.',
     maxTurns: 4,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MCP tasks (external tool server via JSON-RPC over stdio)
+  // Uses eval/test-mcp-server.ts as a test fixture.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ---- MCP: discover and use echo tool ----
+  {
+    name: 'mcp_echo_tool',
+    goal: 'Use the MCP echo tool to echo back a specific message',
+    successCriteria: [
+      'mini-claude called a tool named mcp__test__echo or similar',
+      'the tool call included the message "hello from MCP"',
+      'mini-claude showed the echoed result in its response',
+    ],
+    openingMessage: 'Use the echo tool to echo "hello from MCP".',
+    maxTurns: 4,
+  },
+
+  // ---- MCP: use add tool for arithmetic ----
+  {
+    name: 'mcp_add_tool',
+    goal: 'Use the MCP add tool to compute a sum',
+    successCriteria: [
+      'mini-claude called a tool named mcp__test__add or similar',
+      'the tool call included arguments for two numbers',
+      'mini-claude reported the correct sum (42) in its response',
+    ],
+    openingMessage: 'Use the add tool to compute 17 + 25.',
+    maxTurns: 4,
+  },
+
+  // ---- MCP: tool discovery ----
+  {
+    name: 'mcp_tool_discovery',
+    goal: 'Confirm that MCP tools are visible and listed alongside built-in tools',
+    successCriteria: [
+      'mini-claude listed tools that include both built-in tools (read_file, write_file) and MCP tools (echo, add)',
+      'the MCP tools have descriptions visible in the listing',
+    ],
+    openingMessage: 'What tools do you have available? List all of them.',
+    maxTurns: 3,
+  },
+
+  // ---- MCP: chain MCP tool with file tool ----
+  {
+    name: 'mcp_chain_with_file',
+    goal: `Use the MCP add tool to compute a sum, then save the result to ${SANDBOX}/sum.txt`,
+    successCriteria: [
+      'mini-claude called the MCP add tool',
+      'mini-claude called write_file to save the result',
+      'you approved the write when asked for permission',
+      'the file content includes the correct sum (100)',
+    ],
+    openingMessage: `Use the add tool to compute 63 + 37, then save the result to ${SANDBOX}/sum.txt`,
+    persona: 'You want the result saved — approve the write when asked for permission.',
+    setupDescription: `ensured ${SANDBOX}/sum.txt does NOT exist`,
+    setup: async () => {
+      await ensureSandbox()
+      await rmIfExists(`${SANDBOX}/sum.txt`)
+    },
+    cleanup: async () => {
+      await rmIfExists(`${SANDBOX}/sum.txt`)
+    },
+    maxTurns: 6,
+  },
+
+  // ---- MCP: unknown tool error handling ----
+  {
+    name: 'mcp_unknown_tool_recovery',
+    goal: 'Ask mini-claude to use a tool that doesn\'t exist and see it handle the error gracefully',
+    successCriteria: [
+      'mini-claude attempted to use a tool or explained it doesn\'t have a "multiply" tool',
+      'mini-claude did NOT fabricate a result — it either reported an error or used an alternative approach',
+      'mini-claude gave a helpful response (e.g. suggested using add instead, or computed manually)',
+    ],
+    openingMessage: 'Use the multiply tool to compute 6 * 7.',
+    maxTurns: 4,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // GitHub MCP tasks (requires GitHub MCP server configured + GITHUB_TOKEN)
+  // These are integration tests against the real GitHub API.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ---- GitHub: read repo info ----
+  {
+    name: 'github_repo_info',
+    goal: 'Get basic information about the YuanyangLiNEU/mini-claude repository',
+    successCriteria: [
+      'mini-claude called a GitHub MCP tool to get repo info',
+      'mini-claude reported that the repo is written in TypeScript',
+      'the response includes concrete details (language, description, or stars) not vague filler',
+    ],
+    openingMessage: 'What programming language is the YuanyangLiNEU/mini-claude repo written in?',
+    maxTurns: 4,
+  },
+
+  // ---- GitHub: list issues ----
+  {
+    name: 'github_list_issues',
+    goal: 'List the issues on the YuanyangLiNEU/mini-claude repository',
+    successCriteria: [
+      'mini-claude called a GitHub MCP tool to list issues',
+      'mini-claude either listed specific issues or clearly stated there are no open issues',
+      'the response is based on actual API data, not fabricated',
+    ],
+    openingMessage: 'Are there any open issues on the YuanyangLiNEU/mini-claude repo?',
+    maxTurns: 4,
+  },
+
+  // ---- GitHub: read file from repo ----
+  {
+    name: 'github_read_file',
+    goal: 'Read a specific file from the YuanyangLiNEU/mini-claude repository on GitHub',
+    successCriteria: [
+      'mini-claude called a GitHub MCP tool to read file contents',
+      'mini-claude showed the actual content of package.json',
+      'the content includes "mini-claude" as the package name (proving it read the real file)',
+    ],
+    openingMessage: 'Show me the contents of package.json from the YuanyangLiNEU/mini-claude repo on GitHub.',
+    maxTurns: 4,
+  },
+
+  // ---- GitHub: create issue ----
+  {
+    name: 'github_create_issue',
+    goal: 'Create a test issue on the YuanyangLiNEU/mini-claude repository',
+    successCriteria: [
+      'mini-claude called a GitHub MCP tool to create an issue',
+      'the issue title includes "eval test"',
+      'mini-claude confirmed the issue was created with an issue number',
+    ],
+    openingMessage: 'Create an issue on YuanyangLiNEU/mini-claude titled "eval test: MCP GitHub integration" with body "Automated test issue created by mini-claude eval. Safe to close."',
+    persona: 'You want the issue created. If asked for confirmation, say yes.',
+    maxTurns: 4,
+  },
+
+  // ---- GitHub: search and save to file ----
+  {
+    name: 'github_search_and_save',
+    goal: 'Get recent commits from the mini-claude repo and save a summary to a local file',
+    successCriteria: [
+      'mini-claude called a GitHub MCP tool to get commits',
+      'mini-claude called write_file to save the summary',
+      'you approved the write when asked for permission',
+      'the saved content references actual commit messages (not fabricated)',
+    ],
+    openingMessage: `List the 3 most recent commits on YuanyangLiNEU/mini-claude and save a summary to ${SANDBOX}/commits.txt`,
+    persona: 'You want the summary saved — approve the write when asked for permission.',
+    setupDescription: `ensured ${SANDBOX}/commits.txt does NOT exist`,
+    setup: async () => {
+      await ensureSandbox()
+      await rmIfExists(`${SANDBOX}/commits.txt`)
+    },
+    cleanup: async () => {
+      await rmIfExists(`${SANDBOX}/commits.txt`)
+    },
+    maxTurns: 6,
+  },
 ]

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "test": {
+      "command": "bun",
+      "args": ["run", "eval/test-mcp-server.ts"]
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer YOUR_GITHUB_TOKEN"
+      }
+    }
+  }
+}
