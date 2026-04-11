@@ -14,6 +14,38 @@ exactly like a human sitting at the terminal. The eval is a complete black box:
 no imports from mini-claude internals, no mocking, no shortcuts. Write the
 test, implement the feature, watch it pass.
 
+## See it in action
+
+The fun part: watch mini-claude run through an eval task live in the web portal.
+
+```sh
+bun run eval/portal.ts   # http://localhost:3333
+```
+
+Pick a task from the grouped sidebar, click ▶ Run, and watch an LLM evaluator
+drive mini-claude through a real conversation, streamed to your browser over
+Server-Sent Events:
+
+- **Dynamic opening** — the evaluator reads the task goal and phrases a natural
+  user message. Every run looks slightly different, which stresses robustness
+  to wording.
+- **Live agent output** — mini-claude's reply streams in as tokens arrive from
+  the API, rendered in chat bubbles.
+- **Tool calls inline** — `→ write_file(...)` / `← wrote 42 bytes` appear the
+  moment each tool runs.
+- **Permission prompts** — when mini-claude asks to run a dangerous tool, the
+  evaluator's approve/deny thinking is shown *before* it decides.
+- **Turn-by-turn verdicts** — after each turn, the evaluator picks `goal_met` /
+  `send_message` / `give_up` with its reasoning visible alongside.
+- **Stop anytime** — the ⏹ Stop button tears down the mini-claude subprocess
+  and any in-flight evaluator call cleanly.
+
+The **Past runs** tab replays JSONL logs from previous runs as animated chat
+bubbles, so you can diff how mini-claude behaves as you add capabilities.
+
+If you'd rather not use the portal, `bun run eval/runner.ts` runs the same task
+loop from the CLI and writes the same JSONL logs.
+
 ## Why this exists
 
 Claude Code is 500K+ lines of production code. This project distills the core
@@ -268,27 +300,8 @@ bun run eval/runner.ts --only=write_file_approved   # single task
 bun run eval/runner.ts --list                       # list all tasks
 ```
 
-### Or run from the web portal (interactive)
-
-```sh
-bun run eval/portal.ts   # http://localhost:3333
-```
-
-The portal has two modes:
-
-**Run tasks** (live) — Pick a task from the grouped sidebar, click ▶ Run,
-and watch events stream in real time as the task runs on the server:
-- Setup progress, subprocess spawn, greeting
-- User messages (phrased dynamically by the evaluator)
-- mini-claude's response bubbles
-- Permission prompts with the evaluator's approve/deny thinking
-- Evaluator decisions at each turn
-- Final verdict
-
-**Past runs** (replay) — Browse JSONL logs from previous runs. Each task
-card shows goal, success criteria, evaluator verdict, and a full chat-bubble
-conversation timeline. A ▶ Replay button animates through the turns one at
-a time so you can watch old runs unfold.
+For the interactive live portal, see [**See it in action**](#see-it-in-action)
+at the top of this README.
 
 ### TDD workflow
 
