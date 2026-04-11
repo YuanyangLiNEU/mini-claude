@@ -1,200 +1,120 @@
 /**
- * Eval runner — drives a real mini-claude REPL subprocess and a simulated
+ * CLI eval runner — drives a real mini-claude REPL subprocess and a simulated
  * user (evaluator). The subprocess is a black box: we interact through
  * stdin/stdout only, exactly like a human would.
  *
  * NO IMPORTS from mini-claude internals (tools, agent, permissions, etc).
  *
+ * The core loop lives in run-task.ts as an async generator. This file just
+ * consumes the event stream for each task and writes to the terminal + JSONL.
+ *
  * Run:
  *   bun run eval/runner.ts
  *   bun run eval/runner.ts --only=read_file_capability
+ *   bun run eval/runner.ts --only='web_search*'
  *   bun run eval/runner.ts --list
  */
 
 import { mkdir } from 'node:fs/promises'
 import { bold, cyan, dim, gray, green, red, yellow } from '../ui.ts'
-import { decideNextStep, decidePermission } from './evaluator.ts'
-import { spawnMiniClaude } from './subprocess.ts'
+import { runTaskStream } from './run-task.ts'
 import { TASKS } from './tasks.ts'
-import type { ConversationResult, Task, TurnRecord } from './types.ts'
-
-async function runOneTask(task: Task): Promise<ConversationResult> {
-  if (task.setup) await task.setup()
-
-  const maxTurns = task.maxTurns ?? 6
-  const turns: TurnRecord[] = []
-  let outcome: ConversationResult['outcome'] = 'max_turns'
-  let finalSummary: string | undefined
-  let giveUpReason: string | undefined
-  let errorMessage: string | undefined
-  const convoStart = Date.now()
-
-  // Full conversation transcript (what we show the evaluator for context)
-  let conversationLog = ''
-
-  const mc = spawnMiniClaude()
-
-  try {
-    // Wait for the REPL to boot (greeting + first ❯ prompt)
-    const greeting = await mc.waitForIdle()
-    conversationLog += greeting.output
-
-    let nextMessage = task.openingMessage
-
-    for (let turnNum = 1; turnNum <= maxTurns; turnNum++) {
-      // Send user message
-      mc.sendMessage(nextMessage)
-      conversationLog += `\n[USER]: ${nextMessage}\n`
-
-      // Wait for mini-claude to respond
-      const { output, reason } = await mc.waitForIdle()
-      conversationLog += output
-
-      if (reason === 'timeout') {
-        outcome = 'error'
-        errorMessage = 'mini-claude timed out (no prompt detected)'
-        break
-      }
-
-      if (reason === 'permission') {
-        // mini-claude is asking for permission — ask the evaluator
-        const permDecision = await decidePermission(task, conversationLog, output)
-
-        turns.push({
-          turnNum,
-          rawOutput: output,
-          idleReason: reason,
-          permissionDecision: {
-            action: permDecision.action,
-            thinking: permDecision.thinking,
-            why: permDecision.action === 'deny' ? permDecision.why : undefined,
-          },
-        })
-
-        // Type the answer
-        const answer = permDecision.action === 'approve' ? 'y' : 'n'
-        mc.answerPermission(answer)
-        conversationLog += `\n[USER PERMISSION]: ${answer}\n`
-
-        // Wait for mini-claude to finish processing after the permission answer
-        const postPerm = await mc.waitForIdle()
-        conversationLog += postPerm.output
-
-        if (postPerm.reason === 'timeout') {
-          outcome = 'error'
-          errorMessage = 'mini-claude timed out after permission answer'
-          break
-        }
-
-        // Now ask the evaluator: is the goal met?
-        const decision = await decideNextStep(task, conversationLog, postPerm.output)
-
-        turns.push({
-          turnNum: turnNum + 0.5, // sub-turn after permission
-          rawOutput: postPerm.output,
-          idleReason: postPerm.reason,
-          evaluatorDecision: {
-            action: decision.action,
-            thinking: decision.thinking,
-            summary: decision.action === 'goal_met' ? decision.summary : undefined,
-            reason: decision.action === 'give_up' ? decision.reason : undefined,
-            message: decision.action === 'send_message' ? decision.message : undefined,
-          },
-        })
-
-        if (decision.action === 'goal_met') {
-          outcome = 'goal_met'
-          finalSummary = decision.summary
-          break
-        }
-        if (decision.action === 'give_up') {
-          outcome = 'give_up'
-          giveUpReason = decision.reason
-          break
-        }
-        nextMessage = decision.message
-        continue
-      }
-
-      // reason === 'prompt' — normal turn completion
-      const decision = await decideNextStep(task, conversationLog, output)
-
-      turns.push({
-        turnNum,
-        rawOutput: output,
-        idleReason: reason,
-        evaluatorDecision: {
-          action: decision.action,
-          thinking: decision.thinking,
-          summary: decision.action === 'goal_met' ? decision.summary : undefined,
-          reason: decision.action === 'give_up' ? decision.reason : undefined,
-          message: decision.action === 'send_message' ? decision.message : undefined,
-        },
-      })
-
-      if (decision.action === 'goal_met') {
-        outcome = 'goal_met'
-        finalSummary = decision.summary
-        break
-      }
-      if (decision.action === 'give_up') {
-        outcome = 'give_up'
-        giveUpReason = decision.reason
-        break
-      }
-      nextMessage = decision.message
-    }
-  } catch (err) {
-    outcome = 'error'
-    errorMessage = err instanceof Error ? err.message : String(err)
-  } finally {
-    mc.shutdown()
-    if (task.cleanup) {
-      try { await task.cleanup() } catch {}
-    }
-  }
-
-  return {
-    task,
-    turns,
-    conversationLog,
-    outcome,
-    finalSummary,
-    giveUpReason,
-    errorMessage,
-    totalWallMs: Date.now() - convoStart,
-  }
-}
+import type { ConversationResult, Task } from './types.ts'
 
 // ── Rendering ────────────────────────────────────────────────────────────────
-
-function printTurn(turn: TurnRecord): void {
-  // Permission decision
-  if (turn.permissionDecision) {
-    const pd = turn.permissionDecision
-    const mark = pd.action === 'approve' ? green('✓ APPROVE') : red('✗ DENY')
-    console.log(`   ${yellow('⚠ permission')} ${mark}`)
-    console.log(dim(`     💭 ${pd.thinking}`))
-    if (pd.why) console.log(dim(`     reason: ${pd.why}`))
-  }
-
-  // Evaluator decision
-  if (turn.evaluatorDecision) {
-    const d = turn.evaluatorDecision
-    console.log(dim(`   💭 evaluator: ${d.thinking}`))
-    if (d.action === 'goal_met') {
-      console.log(`   ${green('✓ goal met')}: ${dim(d.summary || '')}`)
-    } else if (d.action === 'give_up') {
-      console.log(`   ${red('✗ giving up')}: ${dim(d.reason || '')}`)
-    } else if (d.action === 'send_message') {
-      console.log(`   ${cyan('➜')} will reply: ${dim('"' + (d.message || '').slice(0, 100) + '"')}`)
-    }
-  }
-}
 
 function outcomeColor(o: string): (s: string) => string {
   return o === 'goal_met' ? green : o === 'error' ? red : yellow
 }
+
+/**
+ * Consume the async event stream from runTaskStream() and print to the
+ * terminal as events arrive. Returns the final ConversationResult.
+ */
+async function runOneTask(task: Task): Promise<ConversationResult> {
+  console.log()
+  console.log(gray('═'.repeat(60)))
+  console.log(bold(`▸ ${task.name}`))
+  console.log(dim(`  goal: ${task.goal}`))
+  if (task.persona) console.log(dim(`  persona: ${task.persona}`))
+
+  let result: ConversationResult | null = null
+
+  for await (const ev of runTaskStream(task)) {
+    switch (ev.type) {
+      case 'setup_start':
+        console.log(dim('  ⚙ running setup...'))
+        break
+      case 'setup_error':
+        console.log(red(`  ✗ setup failed: ${ev.error}`))
+        break
+      case 'repl_booting':
+        console.log(dim('  ◐ spawning mini-claude subprocess...'))
+        break
+      case 'repl_ready':
+        console.log(dim('  ● mini-claude ready'))
+        break
+      case 'evaluator_thinking':
+        console.log(dim(`  💭 evaluator: ${ev.reason}`))
+        break
+      case 'user_message':
+        console.log(`  ${cyan('👤 user')} (turn ${ev.turnNum}): ${dim(ev.message.slice(0, 120))}`)
+        break
+      case 'agent_output':
+        if (ev.output.trim()) {
+          const lines = ev.output.split('\n').filter(l => l.trim())
+          for (const line of lines) console.log(dim(`    │ ${line}`))
+        }
+        break
+      case 'permission_prompt':
+        console.log(yellow('  ⚠ mini-claude asking for permission...'))
+        break
+      case 'permission_decision': {
+        const mark = ev.action === 'approve' ? green('✓ APPROVE') : red('✗ DENY')
+        console.log(`  ${yellow('⚠ permission')} ${mark}`)
+        console.log(dim(`    💭 ${ev.thinking}`))
+        if (ev.why) console.log(dim(`    reason: ${ev.why}`))
+        break
+      }
+      case 'evaluator_decision': {
+        console.log(dim(`  💭 evaluator: ${ev.thinking}`))
+        if (ev.action === 'goal_met') {
+          console.log(`  ${green('✓ goal met')}: ${dim(ev.summary || '')}`)
+        } else if (ev.action === 'give_up') {
+          console.log(`  ${red('✗ giving up')}: ${dim(ev.reason || '')}`)
+        } else if (ev.action === 'send_message') {
+          console.log(`  ${cyan('➜')} will reply: ${dim('"' + (ev.message || '').slice(0, 100) + '"')}`)
+        }
+        break
+      }
+      case 'task_timeout':
+        console.log(red(`  ⏱ timeout: ${ev.message}`))
+        break
+      case 'task_error':
+        console.log(red(`  ✗ error: ${ev.error}`))
+        break
+      case 'task_done':
+        result = ev.result
+        break
+    }
+  }
+
+  if (!result) {
+    throw new Error(`task ${task.name} produced no result`)
+  }
+
+  console.log()
+  const oc = outcomeColor(result.outcome)
+  const label = result.outcome.toUpperCase().replace(/_/g, ' ')
+  console.log(`  ${oc(label)} · ${dim(`${result.turns.length} turns · ${(result.totalWallMs / 1000).toFixed(1)}s`)}`)
+  if (result.finalSummary) console.log(dim(`  summary: ${result.finalSummary}`))
+  if (result.giveUpReason) console.log(dim(`  reason: ${result.giveUpReason}`))
+  if (result.errorMessage) console.log(red(`  error: ${result.errorMessage}`))
+
+  return result
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   const args = process.argv.slice(2)
@@ -257,46 +177,15 @@ async function main() {
   const results: ConversationResult[] = []
 
   for (const task of tasks) {
-    console.log()
-    console.log(gray('═'.repeat(60)))
-    console.log(bold(`▸ ${task.name}`))
-    console.log(dim(`  goal: ${task.goal}`))
-    if (task.setupDescription) console.log(dim(`  setup: ${task.setupDescription}`))
-    if (task.persona) console.log(dim(`  persona: ${task.persona}`))
-
     const result = await runOneTask(task)
     results.push(result)
-
-    // Print raw mini-claude output (indented)
-    if (result.conversationLog) {
-      console.log()
-      const lines = result.conversationLog.split('\n')
-      for (const line of lines) {
-        if (line.trim()) console.log(dim(`  │ ${line}`))
-      }
-    }
-
-    // Print evaluator decisions
-    for (const turn of result.turns) {
-      printTurn(turn)
-    }
-
-    console.log()
-    const oc = outcomeColor(result.outcome)
-    const label = result.outcome.toUpperCase().replace(/_/g, ' ')
-    console.log(`   ${oc(label)} · ${dim(`${result.turns.length} turns · ${(result.totalWallMs / 1000).toFixed(1)}s`)}`)
-    if (result.finalSummary) console.log(dim(`   summary: ${result.finalSummary}`))
-    if (result.giveUpReason) console.log(dim(`   reason: ${result.giveUpReason}`))
-    if (result.errorMessage) console.log(red(`   error: ${result.errorMessage}`))
 
     writeLog({
       type: 'task_result',
       task: task.name,
       goal: task.goal,
       successCriteria: task.successCriteria,
-      openingMessage: task.openingMessage,
       persona: task.persona,
-      setupDescription: task.setupDescription,
       outcome: result.outcome,
       finalSummary: result.finalSummary,
       giveUpReason: result.giveUpReason,

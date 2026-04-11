@@ -76,8 +76,14 @@ export function spawnMiniClaude(): MiniClaudeSubprocess {
   })
 
   function sendMessage(text: string): void {
-    log.debug('sending message', { text: text.slice(0, 80) })
-    proc.stdin.write(text + '\n')
+    // The REPL's readline reads one line per submission — any internal \n
+    // would terminate the message early, causing truncation. Collapse all
+    // whitespace (including newlines) into single spaces so multi-line
+    // evaluator messages (e.g. requirements lists) survive as a single
+    // readline input. The model handles the loss of line breaks fine.
+    const flat = text.replace(/\s+/g, ' ').trim()
+    log.debug('sending message', { len: flat.length, preview: flat.slice(0, 120) })
+    proc.stdin.write(flat + '\n')
   }
 
   function answerPermission(answer: 'y' | 'n' | 'a'): void {

@@ -54,43 +54,36 @@ const PERMISSION_SCHEMA = {
 
 function buildTurnSystemPrompt(task: Task): string {
   const lines = [
-    'You are simulating a user interacting with an AI CLI tool called',
-    'mini-claude. You see its raw terminal output — exactly what a human',
-    'sitting at their keyboard would see.',
+    'You are a senior QA auditor for an AI CLI tool called mini-claude. You',
+    'play the role of a user to exercise the test described below, but your',
+    'loyalty is to the test — not to helping mini-claude succeed. Your job',
+    'is to report whether mini-claude actually has this capability. Both',
+    '"pass" and "fail" are valid outcomes; failure is not your problem to',
+    'solve.',
     '',
-    'The output may contain:',
-    '  - Lines with "→" = tool calls mini-claude is making',
+    'You see mini-claude\'s raw terminal output — exactly what a human at the',
+    'keyboard would see:',
+    '  - Lines with "→" = tool calls mini-claude made',
     '  - Lines with "←" = tool results that came back',
-    '  - Lines starting with "──" = status annotations (ignore these)',
-    '  - Lines starting with "[" like "[done ·" = completion markers',
-    '  - Regular text = mini-claude\'s response to you',
+    '  - Lines starting with "──" = status annotations (ignore)',
+    '  - Regular text = mini-claude speaking to you',
     '',
-    `YOUR GOAL: ${task.goal}`,
+    `TEST: ${task.goal}`,
     '',
     'SUCCESS CRITERIA:',
-    ...task.successCriteria.map((c, i) => `  ${i + 1}. ${c}`),
+    ...task.successCriteria.map(c => `  - ${c}`),
   ]
   if (task.persona) {
-    lines.push('', `YOUR PERSONA: ${task.persona}`)
+    lines.push('', `PERSONA: ${task.persona}`)
   }
   lines.push(
     '',
-    'Decide ONE of:',
-    '  goal_met      — all criteria satisfied; include a summary',
-    '  give_up       — mini-claude failed in a way you cannot recover from',
-    '  send_message  — reply with another message to continue the conversation',
+    'Each turn, pick one:',
+    '  goal_met      — the test passed; include a summary of the evidence',
+    '  give_up       — mini-claude cannot pass; include a reason',
+    '  send_message  — reply to drive the conversation forward',
     '',
-    'Include your thinking (1-3 sentences). Be honest about what you see.',
-    '',
-    'JUDGING CRITERIA:',
-    '  - Every success criterion must be met. Do not mark goal_met if any is missing.',
-    '  - Judge what you SEE, not what mini-claude claims. If it says "done" but',
-    '    you see no tool call or an error in the output, that is NOT goal_met.',
-    '  - Judge answer quality: a correct tool call that produces a wrong, vague,',
-    '    or fabricated answer is NOT goal_met. Answers must be concrete, relevant,',
-    '    and plausible.',
-    '  - If mini-claude is clearly on the right track but hasn\'t finished yet,',
-    '    use send_message to let it continue — don\'t give_up prematurely.',
+    'Use your judgment. Include 1-3 sentences of thinking with every decision.',
   )
   return lines.join('\n')
 }
@@ -98,12 +91,53 @@ function buildTurnSystemPrompt(task: Task): string {
 function buildPermissionSystemPrompt(task: Task): string {
   return buildTurnSystemPrompt(task) +
     '\n\n' +
-    'RIGHT NOW: mini-claude is asking YOU for permission to run a dangerous ' +
-    'tool. You can see the permission prompt in the output. Decide: approve ' +
-    'or deny. Base your decision on your goal and persona.'
+    'RIGHT NOW: mini-claude is asking you for permission to run a tool. ' +
+    'Decide approve or deny based on whether the action serves the test. ' +
+    'If a persona is set, it should guide your decision. Include your thinking.'
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+const OPENING_SCHEMA = {
+  type: 'object',
+  properties: {
+    message: { type: 'string' },
+  },
+  required: ['message'],
+}
+
+/**
+ * Generate a natural opening message for the task based on its goal + persona.
+ * The evaluator is a smart QA — it reads the test description, figures out
+ * what the first user message should look like, and phrases it naturally.
+ */
+export async function generateOpeningMessage(task: Task): Promise<string> {
+  const systemPrompt = [
+    'You are a QA tester about to run a test on an AI CLI tool called',
+    'mini-claude. You will play the role of a user. Read the test description',
+    'below, decide what the user would say first to exercise the capability',
+    'under test, and write that opening message.',
+    '',
+    `TEST: ${task.goal}`,
+  ]
+  if (task.persona) {
+    systemPrompt.push('', `PERSONA: ${task.persona}`)
+  }
+  systemPrompt.push(
+    '',
+    'Write the first message the user would send. Phrase it naturally — any',
+    'length, any tone. If the test description contains literal paths, file',
+    'names, or exact content, include them verbatim so mini-claude sees the',
+    'same values as the test fixture.',
+  )
+
+  const userPrompt = 'Write your first message. Respond as JSON with a "message" field.'
+
+  log.debug('generateOpeningMessage', { task: task.name })
+  const raw = await spawnClaude(systemPrompt.join('\n'), userPrompt, OPENING_SCHEMA)
+  const parsed = parseEnvelope(raw)
+  return parsed.message || task.goal
+}
 
 /**
  * Given the raw terminal output from mini-claude, decide what to do next.
@@ -118,7 +152,7 @@ export async function decideNextStep(
       ? `Conversation so far:\n\`\`\`\n${truncate(conversationSoFar, 3000)}\n\`\`\``
       : '(This is the first turn.)',
     '',
-    `Your original request: "${task.openingMessage}"`,
+    `Your goal: ${task.goal}`,
     '',
     'mini-claude just printed:',
     '```',
@@ -154,7 +188,7 @@ export async function decidePermission(
       ? `Conversation so far:\n\`\`\`\n${truncate(conversationSoFar, 3000)}\n\`\`\``
       : '',
     '',
-    `Your original request: "${task.openingMessage}"`,
+    `Your goal: ${task.goal}`,
     '',
     'mini-claude just printed this permission prompt:',
     '```',

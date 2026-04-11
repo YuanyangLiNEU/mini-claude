@@ -153,7 +153,7 @@ export class HttpMcpClient implements McpClient {
     }
 
     // Plain JSON
-    return await resp.json()
+    return (await resp.json()) as { result?: unknown; error?: { code: number; message: string } }
   }
 
   private async notify(method: string, params?: Record<string, unknown>): Promise<void> {

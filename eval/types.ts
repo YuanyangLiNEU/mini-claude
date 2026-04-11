@@ -13,8 +13,11 @@ export type Task = {
   goal: string
   /** Concrete success criteria the evaluator checks */
   successCriteria: string[]
-  /** The first message the simulated user sends */
-  openingMessage: string
+  /**
+   * Legacy: fixed opening message. Kept on existing tasks for documentation,
+   * but runtime now asks the evaluator to generate turn-1 from the goal.
+   */
+  openingMessage?: string
   /** Persona guidance for the evaluator (optional) */
   persona?: string
   /** Max conversation turns. Default 6. */

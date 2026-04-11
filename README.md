@@ -180,7 +180,7 @@ Example `.mcp.json`:
 MCP tools appear alongside built-in tools — Claude doesn't know the difference.
 The naming convention is `mcp__<server>__<tool>` (e.g., `mcp__github__create_issue`).
 
-### Files
+### Core files
 
 | File | What it does |
 |---|---|
@@ -194,6 +194,19 @@ The naming convention is `mcp__<server>__<tool>` (e.g., `mcp__github__create_iss
 | `repl.ts` | Terminal loop, slash commands, event rendering, MCP tool loading |
 | `debug.ts` | `makeLogger(subsystem)`, silent by default, `DEBUG=1` to enable |
 | `ui.ts` | ANSI helpers, `formatToolCall`, `formatToolResult` |
+
+### Eval files
+
+| File | What it does |
+|---|---|
+| `eval/tasks.ts` | 38 task definitions grouped by difficulty and capability |
+| `eval/types.ts` | `Task`, `TurnRecord`, `ConversationResult` types |
+| `eval/subprocess.ts` | Spawns the mini-claude REPL, exposes stdin/stdout helpers |
+| `eval/evaluator.ts` | LLM-as-user via `claude -p`: opening message gen, turn decisions, permission decisions |
+| `eval/run-task.ts` | Core task loop as an async generator yielding `TaskEvent`s |
+| `eval/runner.ts` | CLI runner — consumes `runTaskStream`, prints to terminal, writes JSONL |
+| `eval/portal.ts` | Web portal — task list, live SSE runs, past-run browsing |
+| `eval/test-mcp-server.ts` | Tiny JSON-RPC MCP server (echo + add tools) for eval fixtures |
 
 Zero runtime dependencies beyond Bun.
 
@@ -213,38 +226,69 @@ stdin/stdout — no imports from mini-claude internals. An LLM evaluator
   eval runner  ←──────────────────→  mini-claude subprocess
        ↓                                    ↓
   LLM evaluator                     real agent loop
-  (Claude Sonnet)                   real tools
-       ↓                            real permissions
+  (Claude Sonnet)                   real tools + MCP + permissions
+       ↓
   reads terminal output
   decides: goal_met / give_up / send_message / approve / deny
 ```
 
 The evaluator sees **exactly what a human would see** — streaming text, tool
-call arrows (`���`/`←`), permission prompts, error messages. It makes structured
-JSON decisions about whether success criteria are met.
+call arrows, permission prompts, error messages. It makes structured JSON
+decisions at every turn.
+
+**The evaluator even writes its own first message.** Each task is defined by
+a `goal` describing what capability is being tested. Before turn 1, the
+evaluator reads the goal and phrases a natural user message to start the
+conversation. Same run of the same task looks slightly different every time.
 
 ### What it tests
 
-**23 tasks** across four categories:
+**38 tasks** across five categories:
 
-**File tools** (7 tasks) — read, list, write, delete, multi-step chains, error recovery, permission handling
+| Category | Count | What it covers |
+|---|---|---|
+| **Core** | 7 | Read, list, write, delete, multi-step chains, error recovery, permission handling |
+| **Web search** | 6 | Factual queries, synthesis, search+write chains, follow-ups, formatting, knowledge-only |
+| **MCP test server** | 5 | Tool discovery, echo, add, MCP+file chains, unknown tool recovery |
+| **GitHub integration** | 5 | Repo info, issues, file reads, issue creation, commits+save chain |
+| **Medium difficulty** | 5 | News digest, tech explainer, CLI tool, gift research, data dashboard |
+| **Hard (north star)** | 10 | Indie game, equity research, trip planning, year-in-review, book writing, curriculum design, startup validation, complex purchase, literature review, SaaS prototype |
 
-**Web search** (6 tasks) — factual queries, synthesis, search+write chains, follow-ups, formatting, knowledge-only
+The hard tasks are **aspirational** — most will fail today. They exist to
+drive the roadmap: if mini-claude can ship a playable game or produce an
+institutional-grade equity report, we're doing well.
 
-**MCP test server** (5 tasks) — tool discovery, echo, add, MCP+file chains, unknown tool recovery
-
-**GitHub MCP** (5 tasks) — repo info, list issues, read file, create issue, commits+save chain
-
-### Run it
+### Run from the CLI
 
 ```sh
-bun run eval/runner.ts                          # all 23 tasks
-bun run eval/runner.ts '--only=web_search*'     # web search tasks only
-bun run eval/runner.ts '--only=mcp*'            # MCP test tasks
-bun run eval/runner.ts '--only=github*'         # GitHub integration tasks
-bun run eval/runner.ts --only=write_file_approved  # single task
-bun run eval/runner.ts --list                   # list all tasks
+bun run eval/runner.ts                              # all tasks
+bun run eval/runner.ts '--only=web_search*'         # group wildcard
+bun run eval/runner.ts '--only=mcp*,github*'        # comma-separated groups
+bun run eval/runner.ts --only=write_file_approved   # single task
+bun run eval/runner.ts --list                       # list all tasks
 ```
+
+### Or run from the web portal (interactive)
+
+```sh
+bun run eval/portal.ts   # http://localhost:3333
+```
+
+The portal has two modes:
+
+**Run tasks** (live) — Pick a task from the grouped sidebar, click ▶ Run,
+and watch events stream in real time as the task runs on the server:
+- Setup progress, subprocess spawn, greeting
+- User messages (phrased dynamically by the evaluator)
+- mini-claude's response bubbles
+- Permission prompts with the evaluator's approve/deny thinking
+- Evaluator decisions at each turn
+- Final verdict
+
+**Past runs** (replay) — Browse JSONL logs from previous runs. Each task
+card shows goal, success criteria, evaluator verdict, and a full chat-bubble
+conversation timeline. A ▶ Replay button animates through the turns one at
+a time so you can watch old runs unfold.
 
 ### TDD workflow
 
@@ -258,25 +302,13 @@ bun run eval/runner.ts --only=my_new_task
 # 3. Implement the feature
 # 4. Run again — expect pass
 bun run eval/runner.ts --only=my_new_task
-
-# 5. Regression check
-bun run eval/runner.ts
 ```
-
-### Web portal
-
-```sh
-bun run eval/portal.ts    # http://localhost:3333
-```
-
-Browse run results in a web UI: score summaries, per-task cards with goals
-and success criteria, full conversation timelines showing user messages,
-mini-claude responses, permission decisions, and evaluator reasoning.
 
 ### Logs
 
 Every run writes JSONL to `eval/runs/<timestamp>.jsonl` — full conversation
-trajectories, evaluator thinking at each decision point, and outcomes.
+trajectories, evaluator thinking at each decision point, and outcomes. The
+portal reads these for the past-runs view.
 
 ## REPL commands
 
