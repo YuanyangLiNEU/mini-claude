@@ -63,6 +63,8 @@ export function spawnMiniClaude(): MiniClaudeSubprocess {
   // Accumulate stdout between waitForIdle() calls
   let buffer = ''
   let onData: ((chunk: string) => void) | null = null
+  let onClose: (() => void) | null = null
+  let procClosed = false
 
   proc.stdout.on('data', (chunk: Buffer) => {
     const text = stripAnsi(chunk.toString())
@@ -73,6 +75,13 @@ export function spawnMiniClaude(): MiniClaudeSubprocess {
   // stderr — log but don't surface to evaluator
   proc.stderr.on('data', (chunk: Buffer) => {
     log.debug('stderr', stripAnsi(chunk.toString()).trim())
+  })
+
+  // Process exit unblocks any in-flight waitForIdle so callers (eval runner,
+  // abort handlers) don't have to wait on the 120s safety timeout.
+  proc.on('close', () => {
+    procClosed = true
+    if (onClose) onClose()
   })
 
   function sendMessage(text: string): void {
@@ -92,15 +101,32 @@ export function spawnMiniClaude(): MiniClaudeSubprocess {
   }
 
   function waitForIdle(): Promise<{ output: string; reason: IdleReason }> {
-    return new Promise((resolve, reject) => {
+    return new Promise<{ output: string; reason: IdleReason }>(resolve => {
       const startBuffer = buffer
       let idleTimer: ReturnType<typeof setTimeout> | null = null
       let timeoutTimer: ReturnType<typeof setTimeout> | null = null
 
       function cleanup() {
         onData = null
+        onClose = null
         if (idleTimer) clearTimeout(idleTimer)
         if (timeoutTimer) clearTimeout(timeoutTimer)
+      }
+
+      // If the subprocess already died (e.g. abort killed it before this
+      // waitForIdle was called), resolve immediately.
+      if (procClosed) {
+        const accumulated = buffer.slice(startBuffer.length)
+        buffer = ''
+        resolve({ output: accumulated, reason: 'timeout' })
+        return
+      }
+
+      onClose = () => {
+        cleanup()
+        const accumulated = buffer.slice(startBuffer.length)
+        buffer = ''
+        resolve({ output: accumulated, reason: 'timeout' })
       }
 
       function checkIdle() {
@@ -153,9 +179,14 @@ export function spawnMiniClaude(): MiniClaudeSubprocess {
     })
   }
 
+  let shutdownCalled = false
   function shutdown(): void {
+    if (shutdownCalled) return
+    shutdownCalled = true
     log.debug('shutting down subprocess')
-    proc.stdin.write('/exit\n')
+    try {
+      if (proc.stdin.writable) proc.stdin.write('/exit\n')
+    } catch { /* stdin already closed */ }
     setTimeout(() => {
       if (!proc.killed) proc.kill()
     }, 2000)

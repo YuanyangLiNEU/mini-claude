@@ -111,7 +111,7 @@ const OPENING_SCHEMA = {
  * The evaluator is a smart QA — it reads the test description, figures out
  * what the first user message should look like, and phrases it naturally.
  */
-export async function generateOpeningMessage(task: Task): Promise<string> {
+export async function generateOpeningMessage(task: Task, signal?: AbortSignal): Promise<string> {
   const systemPrompt = [
     'You are a QA tester about to run a test on an AI CLI tool called',
     'mini-claude. You will play the role of a user. Read the test description',
@@ -134,7 +134,7 @@ export async function generateOpeningMessage(task: Task): Promise<string> {
   const userPrompt = 'Write your first message. Respond as JSON with a "message" field.'
 
   log.debug('generateOpeningMessage', { task: task.name })
-  const raw = await spawnClaude(systemPrompt.join('\n'), userPrompt, OPENING_SCHEMA)
+  const raw = await spawnClaude(systemPrompt.join('\n'), userPrompt, OPENING_SCHEMA, signal)
   const parsed = parseEnvelope(raw)
   return parsed.message || task.goal
 }
@@ -146,6 +146,7 @@ export async function decideNextStep(
   task: Task,
   conversationSoFar: string,
   latestOutput: string,
+  signal?: AbortSignal,
 ): Promise<TurnDecision> {
   const prompt = [
     conversationSoFar
@@ -163,7 +164,7 @@ export async function decideNextStep(
   ].join('\n')
 
   log.debug('decideNextStep', { task: task.name, outputLen: latestOutput.length })
-  const raw = await spawnClaude(buildTurnSystemPrompt(task), prompt, TURN_SCHEMA)
+  const raw = await spawnClaude(buildTurnSystemPrompt(task), prompt, TURN_SCHEMA, signal)
   const parsed = parseEnvelope(raw)
 
   if (parsed.action === 'goal_met') {
@@ -182,6 +183,7 @@ export async function decidePermission(
   task: Task,
   conversationSoFar: string,
   permissionOutput: string,
+  signal?: AbortSignal,
 ): Promise<PermissionDecision> {
   const prompt = [
     conversationSoFar
@@ -199,7 +201,7 @@ export async function decidePermission(
   ].join('\n')
 
   log.debug('decidePermission', { task: task.name })
-  const raw = await spawnClaude(buildPermissionSystemPrompt(task), prompt, PERMISSION_SCHEMA)
+  const raw = await spawnClaude(buildPermissionSystemPrompt(task), prompt, PERMISSION_SCHEMA, signal)
   const parsed = parseEnvelope(raw)
 
   if (parsed.action === 'approve') {
@@ -228,8 +230,17 @@ function parseEnvelope(raw: string): Record<string, string> {
   throw new Error('no structured_output or result in evaluator response')
 }
 
-function spawnClaude(systemPrompt: string, userPrompt: string, schema: object): Promise<string> {
+function spawnClaude(
+  systemPrompt: string,
+  userPrompt: string,
+  schema: object,
+  signal?: AbortSignal,
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'))
+      return
+    }
     const proc = spawn(
       'claude',
       [
@@ -249,13 +260,24 @@ function spawnClaude(systemPrompt: string, userPrompt: string, schema: object): 
     proc.stdout.on('data', (d: Buffer) => (stdout += d.toString()))
     proc.stderr.on('data', (d: Buffer) => (stderr += d.toString()))
 
+    const onAbort = () => {
+      if (!proc.killed) proc.kill()
+      reject(new Error('aborted'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
     proc.on('close', code => {
+      signal?.removeEventListener('abort', onAbort)
+      if (signal?.aborted) return
       if (code !== 0) {
         reject(new Error(`evaluator subprocess exited ${code}: ${stderr.slice(0, 200)}`))
         return
       }
       resolve(stdout.trim())
     })
-    proc.on('error', reject)
+    proc.on('error', err => {
+      signal?.removeEventListener('abort', onAbort)
+      reject(err)
+    })
   })
 }

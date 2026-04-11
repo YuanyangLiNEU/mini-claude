@@ -571,18 +571,20 @@ const INDEX_HTML = `<!DOCTYPE html>
   // ── Live run streaming ───────────────────────────────────────────────────
 
   let currentEventSource = null;
-  let currentTurnUserMsg = null; // accumulator for the current turn's user message
+  let currentRunTaskName = null;
 
   function startRun(taskName) {
     if (currentEventSource) {
       currentEventSource.close();
       currentEventSource = null;
     }
+    currentRunTaskName = taskName;
     const chat = document.getElementById('live-chat');
     chat.innerHTML = '';
     const btn = document.getElementById('run-btn');
-    btn.disabled = true;
-    btn.textContent = '⏳ Running...';
+    btn.classList.add('stop');
+    btn.textContent = '⏹ Stop task';
+    btn.onclick = () => stopRun();
     const chip = document.getElementById('status-chip');
     chip.className = 'status-chip running';
     chip.innerHTML = '<span class="pulse"></span>Running';
@@ -602,9 +604,37 @@ const INDEX_HTML = `<!DOCTYPE html>
         currentEventSource.close();
         currentEventSource = null;
       }
-      btn.disabled = false;
-      btn.textContent = '▶ Run task';
+      resetRunButton();
     };
+  }
+
+  function stopRun() {
+    // Closing the EventSource on the client closes the HTTP connection,
+    // which fires cancel() on the server-side ReadableStream and aborts
+    // the task. The server will send a task_error event we won't receive
+    // (the connection is already closing), so we update UI immediately.
+    if (currentEventSource) {
+      currentEventSource.close();
+      currentEventSource = null;
+    }
+    appendToChat(infoRow('⏹ stopped by user', 'error'));
+    const chip = document.getElementById('status-chip');
+    if (chip) {
+      chip.className = 'status-chip error';
+      chip.textContent = 'Stopped';
+    }
+    resetRunButton();
+  }
+
+  function resetRunButton() {
+    const btn = document.getElementById('run-btn');
+    if (!btn) return;
+    btn.classList.remove('stop');
+    btn.textContent = '▶ Run task';
+    if (currentRunTaskName) {
+      const name = currentRunTaskName;
+      btn.onclick = () => startRun(name);
+    }
   }
 
   function appendToChat(html) {
@@ -1023,6 +1053,7 @@ const INDEX_HTML = `<!DOCTYPE html>
   window.switchTab = switchTab;
   window.selectTask = selectTask;
   window.startRun = startRun;
+  window.stopRun = stopRun;
 
   // Initial load: tasks tab is active by default
   loadTaskSidebar();
@@ -1078,6 +1109,9 @@ const server = Bun.serve({
       const task = TASKS.find(t => t.name === taskName)
       if (!task) return new Response('Task not found', { status: 404 })
 
+      // Client disconnect (Stop button closes EventSource) triggers cancel(),
+      // which aborts the controller so runTaskStream unwinds cleanly.
+      const abortController = new AbortController()
       const stream = new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder()
@@ -1093,15 +1127,18 @@ const server = Bun.serve({
             } catch { /* stream closed */ }
           }, 2000)
           try {
-            for await (const ev of runTaskStream(task)) {
+            for await (const ev of runTaskStream(task, { signal: abortController.signal })) {
               send(ev)
             }
           } catch (err) {
             send({ type: 'task_error', error: err instanceof Error ? err.message : String(err) })
           } finally {
             clearInterval(keepalive)
-            controller.close()
+            try { controller.close() } catch { /* already closed */ }
           }
+        },
+        cancel() {
+          abortController.abort()
         },
       })
 

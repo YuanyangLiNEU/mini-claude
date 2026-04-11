@@ -140,6 +140,7 @@ async function main() {
         system: DEFAULT_SYSTEM,
         model,
         canUseTool: permissions.canUseTool,
+        maxTurns: 50,
       })) {
         switch (ev.type) {
           case 'turn_start':
